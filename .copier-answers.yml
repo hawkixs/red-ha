@@ -1,0 +1,10 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v0.6.0
+_src_path: git@github.com:hawkixs/red-rail.git
+brain_key: red-ha
+description: Python library and ha CLI to run tasks on headless agent providers
+ledger: file
+project: red-ha
+rail_ref: 46bbd5396b2f6a747c936899360f58c4b73e7b9f
+stack: python
+tier: bootstrap

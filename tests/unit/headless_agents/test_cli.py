@@ -810,9 +810,7 @@ def test_an_invalid_workflows_file_refuses_a_provider_run(world: _World) -> None
 
 
 def test_the_readme_synopsis_lists_ha_workflows() -> None:
-    readme = (
-        Path(__file__).resolve().parents[3] / "packages" / "headless-agents" / "README.md"
-    ).read_text(encoding="utf-8")
+    readme = (Path(__file__).resolve().parents[3] / "README.md").read_text(encoding="utf-8")
     assert "ha workflows [--json]" in readme
 
 
@@ -1029,17 +1027,13 @@ def test_run_help_ends_with_the_exit_codes_and_three_examples(
 def test_the_package_installs_the_ha_command() -> None:
     import tomllib
 
-    pyproject = (
-        Path(__file__).resolve().parents[3] / "packages" / "headless-agents" / "pyproject.toml"
-    )
+    pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
     scripts = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["scripts"]
     assert scripts == {"ha": "headless_agents.cli:main"}
 
 
 def test_the_readme_synopsis_uses_the_new_grammar() -> None:
-    readme = (
-        Path(__file__).resolve().parents[3] / "packages" / "headless-agents" / "README.md"
-    ).read_text(encoding="utf-8")
+    readme = (Path(__file__).resolve().parents[3] / "README.md").read_text(encoding="utf-8")
     assert "ha run TARGET" in readme
     assert "ha run -p " not in readme
 

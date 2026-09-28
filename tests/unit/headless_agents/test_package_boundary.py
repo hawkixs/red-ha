@@ -1,9 +1,7 @@
-"""The ``headless_agents`` workspace member never depends on ``brain_v42``.
+"""The standalone ``headless_agents`` package never depends on ``brain_v42``.
 
-Brain ticket b2a2d1a5 (decision 3c5c56e1): the shared agent runtime lives in
-``packages/headless-agents/`` as a uv workspace member that other projects
-install on its own. ``brain_v42`` depends on it; the reverse is forbidden, and
-this file is the guard the ticket asks for. Three angles, because each catches
+The shared agent runtime lives at the repository root. This file checks its
+package boundary from three angles, because each catches
 a failure the others miss:
 
 - the AST scan catches a literal ``import brain_v42`` even inside a function
@@ -11,14 +9,11 @@ a failure the others miss:
 - the dry import in a fresh interpreter catches a transitive pull -- a module
   the package imports that itself imports ``fastmcp``, say -- which no AST scan
   of this package alone can see;
-- the pyproject checks catch the packaging drift that would make a clean tree
-  install dirty: a dependency added to the runtime's own ``pyproject.toml``, or
-  the root project no longer wiring the member through the workspace.
+- the pyproject checks catch packaging drift that would make a clean install
+  pull in heavy dependencies or stop building this package from the root.
 
-The dry import runs with ``-I`` so neither ``PYTHONPATH`` (which pytest sets to
-``src/`` in-process only, never for children) nor the user site can leak
-``brain_v42`` into the child. The package is reachable there because ``uv
-sync`` installs every workspace member into the venv.
+The dry import runs with ``-I`` so neither ``PYTHONPATH`` nor the user site can
+leak ``brain_v42`` into the child. It explicitly imports from this worktree.
 """
 
 from __future__ import annotations
@@ -35,7 +30,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PACKAGE_DIR = REPO_ROOT / "packages" / "headless-agents"
+PACKAGE_DIR = REPO_ROOT
 SOURCE_DIR = PACKAGE_DIR / "src" / "headless_agents"
 
 FORBIDDEN_IMPORT_ROOTS = ("brain_v42", "scripts")
@@ -87,6 +82,7 @@ def test_dry_import_of_every_runtime_module_loads_neither_brain_v42_nor_a_heavy_
     modules = _every_runtime_module()
     program = (
         "import importlib, json, sys, time\n"
+        f"sys.path.insert(0, {str(SOURCE_DIR.parent)!r})\n"
         "started = time.perf_counter()\n"
         f"for name in {modules!r}:\n"
         "    importlib.import_module(name)\n"
@@ -137,18 +133,13 @@ def test_runtime_pyproject_declares_only_the_two_allowed_dependencies() -> None:
     assert "optional-dependencies" not in project, "no extras: nothing may pull a database in"
 
 
-def test_root_project_depends_on_the_runtime_through_the_uv_workspace() -> None:
+def test_repository_root_builds_the_runtime_package_directly() -> None:
     root = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    dependencies = {_requirement_name(item) for item in root["project"]["dependencies"]}
-    assert "headless-agents" in dependencies
-
-    uv = root["tool"]["uv"]
-    members = uv["workspace"]["members"]
-    assert any(
-        Path(member) == Path("packages/headless-agents") or member == "packages/*"
-        for member in members
-    ), members
-    assert uv["sources"]["headless-agents"] == {"workspace": True}
+    assert root["project"]["name"] == "headless-agents"
+    assert root["project"]["version"] == _runtime_pyproject()["project"]["version"]
+    assert root["build-system"]["build-backend"] == "hatchling.build"
+    assert root["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"] == ["src/headless_agents"]
+    assert "workspace" not in root.get("tool", {}).get("uv", {})
 
 
 @pytest.mark.parametrize("required", ["README.md", "LICENSE"])

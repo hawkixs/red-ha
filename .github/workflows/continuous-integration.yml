@@ -1,0 +1,29 @@
+name: continuous-integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rail:
+    # The reusable rail workflow: the project's `make ci`, then `rail check --ci --json`.
+    # One pin for both: the workflow is called at it and installs the rail's code at it, so
+    # the gates guarding this repository move only with a commit here. Quoted: an all-digit
+    # SHA would otherwise be read as a number.
+    uses: hawkixs/red-rail/.github/workflows/rail-ci.yml@46bbd5396b2f6a747c936899360f58c4b73e7b9f
+    with:
+      stack: python
+      rail-ref: "46bbd5396b2f6a747c936899360f58c4b73e7b9f"
+    # No `secrets: inherit`: that hands over everything the repository holds, while rail-ci
+    # declares one optional secret. Omitted entirely, `RAIL_READ_TOKEN` resolves to empty and
+    # the workflow falls back to `github.token` — red-rail is public, so checking it out
+    # needs no token at all.

@@ -4,15 +4,16 @@ Run headless CLI agents (`claude -p`, `codex exec`, `agy --print`,
 `opencode run`) and OpenAI-compatible HTTP providers under a capability profile the
 caller supplies -- from Python, or from a terminal with the `ha` CLI.
 
-This package is the shared agent runtime of the ReD ecosystem, hosted as a uv
-workspace member of the [brain-v42](https://github.com/hawkixs/brain-v42)
-repository and installable on its own:
+This package moved from [hawkixs/brain-v42](https://github.com/hawkixs/brain-v42)
+(where releases used `headless-agents-v*` tags) to this standalone repository,
+[hawkixs/red-ha](https://github.com/hawkixs/red-ha) (with `vX.Y.Z` tags).
+Install the current release:
 
 ```sh
-uv add "headless-agents @ git+https://github.com/hawkixs/brain-v42.git@headless-agents-v0.5.3#subdirectory=packages/headless-agents"
+uv add "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.3"
 ```
 
-Versions are tagged `headless-agents-vX.Y.Z` on this repository; `CHANGELOG.md` lists the
+Versions are tagged `vX.Y.Z` on this repository; `CHANGELOG.md` lists the
 surface under contract and every breaking change. Its dependencies are `pydantic` and
 `structlog` -- nothing else. Importing it
 pulls no database driver, no MCP server framework and no HTTP server.
@@ -436,7 +437,7 @@ repository planted there is discovered from inside it.
 Hand a task to any provider from a terminal or a session. Install it as a tool:
 
 ```sh
-uv tool install "headless-agents @ git+https://github.com/hawkixs/brain-v42.git@headless-agents-v0.5.3#subdirectory=packages/headless-agents"
+uv tool install "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.3"
 ```
 
 ```text

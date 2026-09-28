@@ -1,25 +1,24 @@
-"""One version everywhere: pyproject.toml, the CHANGELOG, every install pin, uv.lock
-(0.5.2 lot 5, Task 4). A regression guard written BEFORE the 0.5.2 release: green
-against the merged tree at 0.5.1, so it proves nothing new until the version actually
-moves -- then it is the thing that must turn green again.
-"""
+"""One version across package metadata, the changelog, and install pins."""
 
 from __future__ import annotations
 
 import re
 import tomllib
+from importlib.metadata import version as installed_version
 from pathlib import Path
 
+import headless_agents
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PACKAGE_ROOT = REPO_ROOT / "packages" / "headless-agents"
+PACKAGE_ROOT = REPO_ROOT
 PYPROJECT_PATH = PACKAGE_ROOT / "pyproject.toml"
 CHANGELOG_PATH = PACKAGE_ROOT / "CHANGELOG.md"
 README_PATH = PACKAGE_ROOT / "README.md"
-UV_LOCK_PATH = REPO_ROOT / "uv.lock"
 
 _RELEASED_HEADING = re.compile(r"^## (\d+\.\d+\.\d+) — ", re.MULTILINE)
 _INSTALL_PIN = re.compile(
-    r"@headless-agents-v(\d+\.\d+\.\d+)#subdirectory=packages/headless-agents"
+    r'^uv (?:add|tool install) "headless-agents @ git\+https://github\.com/hawkixs/red-ha\.git@v(\d+\.\d+\.\d+)"$',
+    re.MULTILINE,
 )
 
 
@@ -45,18 +44,15 @@ def test_no_unreleased_section_remains_for_the_package_version() -> None:
 
 def test_every_install_pin_names_the_package_version_tag() -> None:
     version = _package_version()
-    versions_named: set[str] = set()
-    for path in (README_PATH, CHANGELOG_PATH):
-        versions_named |= set(_INSTALL_PIN.findall(path.read_text(encoding="utf-8")))
-    assert versions_named, "no @headless-agents-vX.Y.Z install pin found in README or CHANGELOG"
-    assert versions_named == {version}, (
-        f"install pins name {sorted(versions_named)}, expected only {{{version!r}}}"
-    )
+    readme = README_PATH.read_text(encoding="utf-8")
+    install_lines = [
+        line for line in readme.splitlines() if line.startswith(("uv add ", "uv tool install "))
+    ]
+    versions_named = _INSTALL_PIN.findall(readme)
+    assert len(install_lines) == len(versions_named) == 2, install_lines
+    assert set(versions_named) == {version}, versions_named
 
 
-def test_the_lockfile_carries_the_package_version() -> None:
-    with UV_LOCK_PATH.open("rb") as stream:
-        lock = tomllib.load(stream)
-    packages = [p for p in lock.get("package", []) if p.get("name") == "headless-agents"]
-    assert len(packages) == 1, f"expected exactly one 'headless-agents' package in {UV_LOCK_PATH}"
-    assert packages[0]["version"] == _package_version()
+def test_the_installed_package_matches_the_repository_version() -> None:
+    assert Path(headless_agents.__file__).resolve().is_relative_to(PACKAGE_ROOT / "src")
+    assert installed_version("headless-agents") == _package_version()

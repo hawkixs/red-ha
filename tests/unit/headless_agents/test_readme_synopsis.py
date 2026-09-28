@@ -16,7 +16,7 @@ from pathlib import Path
 from headless_agents import cli
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-README_PATH = REPO_ROOT / "packages" / "headless-agents" / "README.md"
+README_PATH = REPO_ROOT / "README.md"
 
 _HEADING_AND_FENCE = re.compile(r"## The `ha` CLI\n.*?```text\n(.*?)```", re.DOTALL)
 _LONG_OPTION = re.compile(r"--[a-z][a-z-]*")

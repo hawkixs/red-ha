@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(make:*)",
+      "Bash(git:*)",
+      "Bash(rail:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv run:*)"
+    ]
+  }
+}

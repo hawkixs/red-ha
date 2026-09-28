@@ -1,0 +1,36 @@
+{
+  "digest": "sha256:273ee3e5913ac29f670c6bfd79bde552c7a3c14bde36f18b6491f58643d8c284",
+  "idempotency_key": "contract:red-ha:1",
+  "issuer": "rail new",
+  "kind": "contract",
+  "payload": {
+    "contract": {
+      "acceptance_criteria": [
+        "`rail check` passes at tier bootstrap"
+      ],
+      "acceptance_mode": "explicit",
+      "constraints": [],
+      "deliverables": [
+        {
+          "key": "main",
+          "no_checks_reason": "tier bootstrap: no pull request is reviewed before the design stage",
+          "repository": "hawkixs/red-ha",
+          "repository_id": null,
+          "required_checks": [],
+          "review": {
+            "allowed_reviewers": [],
+            "required_approvals": 0
+          },
+          "target_branch": "main"
+        }
+      ],
+      "objective": "Python library and ha CLI to run tasks on headless agent providers",
+      "priority": 0,
+      "schema_version": 1
+    },
+    "reason": "bootstrap"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-09-28T23:30:07.825603Z",
+  "schema_version": 1
+}

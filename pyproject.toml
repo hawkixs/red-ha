@@ -4,8 +4,6 @@ build-backend = "hatchling.build"
 
 [project]
 name = "headless-agents"
-# Provisional name (Brain decision 1800f901): the definitive one is chosen if
-# and when this member is split into its own repository.
 version = "0.5.3"
 description = "Run headless agents (claude -p, codex exec, agy --print, opencode run, OpenAI-compatible HTTP) under a caller-supplied capability profile, and the ha CLI"
 readme = "README.md"
@@ -22,11 +20,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
     "Typing :: Typed",
 ]
-# The whole point of a separate distribution: a consumer whose invariant is
-# "no database" (red-arena) must not inherit sqlalchemy, asyncpg, neo4j,
-# pgvector, fastmcp or uvicorn from brain_v42. tests/unit/headless_agents/
-# test_package_boundary.py refuses anything beyond pydantic and structlog;
-# today the runtime needs pydantic alone, so structlog is not declared.
+# Keep runtime dependencies small; test_package_boundary.py guards this boundary.
 dependencies = [
     "pydantic>=2.0",
 ]
@@ -35,8 +29,44 @@ dependencies = [
 ha = "headless_agents.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/hawkixs/brain-v42"
-Repository = "https://github.com/hawkixs/brain-v42"
+Homepage = "https://github.com/hawkixs/red-ha"
+Repository = "https://github.com/hawkixs/red-ha"
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-timeout", "pytest-cov", "ruff>=0.8", "mypy"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/headless_agents"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["headless_agents"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-m 'not live'"
+markers = [
+    "live: spends real provider quota on this machine; excluded by default, run with -m live",
+    "real_watcher: starts a real headless-agents process-group watcher (unit tests of procgroup only)",
+]
+faulthandler_timeout = 120
+
+[tool.coverage.run]
+source = ["src/headless_agents"]
+branch = true

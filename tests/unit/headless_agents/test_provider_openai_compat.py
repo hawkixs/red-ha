@@ -12,7 +12,6 @@ import json
 import socket
 import threading
 import time
-import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,9 +33,8 @@ from headless_agents.providers.openai_compat import PRESETS, OpenAICompatProvide
 from headless_agents.spec import RunSpec
 from headless_agents.structured import SchemaError
 
-# A fresh marker per test session: a fake key must not look like a committed
-# secret to the scanner, and a random one proves nothing reused it by chance.
-SECRET = f"fake-{uuid.uuid4().hex}"
+# Verified test sentinel, scoped to this line in .gitleaks.toml.
+SECRET = "sk-test-SECRET-0123456789abcdef"
 KEY_ENV = "HA_TEST_OPENAI_KEY"
 
 

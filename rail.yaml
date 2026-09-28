@@ -1,0 +1,7 @@
+rail: 1
+project: red-ha
+brain_key: red-ha
+tier: bootstrap
+stack: python
+ledger: file
+gates: {}

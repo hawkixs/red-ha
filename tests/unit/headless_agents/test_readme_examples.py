@@ -22,7 +22,7 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-README_PATH = REPO_ROOT / "packages" / "headless-agents" / "README.md"
+README_PATH = REPO_ROOT / "README.md"
 
 _PYTHON_FENCE = re.compile(r"```python\n(.*?)```", re.DOTALL)
 

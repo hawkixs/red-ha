@@ -1,0 +1,32 @@
+# gitleaks configuration: the default rules, plus triaged exceptions.
+# Each exception names one exact file and one anchored line; never a whole file.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated, cached and build trees that are not source"
+paths = [
+  '''(^|/)\.venv/''',
+  '''(^|/)__pycache__/''',
+  '''(^|/)\.pytest_cache/''',
+  '''(^|/)\.mypy_cache/''',
+  '''(^|/)\.ruff_cache/''',
+  '''(^|/)dist/''',
+  '''\.pyc$''',
+]
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = """
+Triaged 2026-09-29. Test sentinel of the openai-compat provider tests: a fixed \
+fake key whose only purpose is to prove it never reaches a log or an error. \
+Not a credential.
+"""
+condition = "AND"
+regexTarget = "line"
+paths = ['''^tests/unit/headless_agents/test_provider_openai_compat\.py$''']
+# An exact substring, as in brain-v42: the ^ and $ anchors never matched the line target.
+regexes = ['''SECRET = "sk-test-SECRET-0123456789abcdef"''']
