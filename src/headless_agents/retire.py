@@ -190,6 +190,13 @@ def _text(document: Mapping[str, object], key: str, path: Path) -> str:
     return value
 
 
+def _absolute(document: Mapping[str, object], key: str, path: Path) -> Path:
+    value = Path(_text(document, key, path))
+    if not value.is_absolute():
+        raise Unknown(f"{path}: {key} {str(value)!r} is not an absolute path")
+    return value
+
+
 def _flag(document: Mapping[str, object], key: str, path: Path) -> bool:
     value = document.get(key)
     if not isinstance(value, bool):
@@ -205,10 +212,13 @@ def _parse(document: Mapping[str, object], path: Path, owner: str) -> Journal:
     if document["owner"] != owner or not RUN_ID_PATTERN.fullmatch(owner):
         raise Unknown(f"{path}: names owner {document['owner']!r}, expected {owner!r}")
     members = document["members"]
-    if not isinstance(members, list) or not all(
-        isinstance(m, str) and RUN_ID_PATTERN.fullmatch(m) for m in members
+    if (
+        not isinstance(members, list)
+        or not all(isinstance(m, str) and RUN_ID_PATTERN.fullmatch(m) for m in members)
+        or len(set(members)) != len(members)
+        or owner not in members
     ):
-        raise Unknown(f"{path}: members are malformed")
+        raise Unknown(f"{path}: members are malformed, repeated or do not list the owner")
     if _text(document, "branch", path) != f"ha/{owner}":
         raise Unknown(f"{path}: branch is not ha/{owner}")
     lifted_at = _text(document, "lifted_at", path)
@@ -229,9 +239,9 @@ def _parse(document: Mapping[str, object], path: Path, owner: str) -> Journal:
     return Journal(
         owner=owner,
         members=tuple(members),
-        repository=Path(_text(document, "repository", path)),
-        common_dir=Path(_text(document, "common_dir", path)),
-        worktree=Path(_text(document, "worktree", path)),
+        repository=_absolute(document, "repository", path),
+        common_dir=_absolute(document, "common_dir", path),
+        worktree=_absolute(document, "worktree", path),
         worktree_registered=_flag(document, "worktree_registered", path),
         branch=f"ha/{owner}",
         tip=_object_id(document["tip"], path, "tip"),
@@ -343,6 +353,26 @@ def _quarantine_of(path: Path, members: Sequence[str]) -> Lifted | None:
     return Lifted(str(path.relative_to(path.parents[1])), sha256_of(path))
 
 
+def _members_of(current: lineages.LineageState, owner: str) -> tuple[str, ...]:
+    """The lineage's member ids, checked before any path is built from one."""
+    members = tuple(sorted(current.members))
+    if not all(RUN_ID_PATTERN.fullmatch(member) for member in members):
+        raise Unknown(f"lineage {owner}: a member id is malformed")
+    if owner not in members:
+        raise RetireRefused(f"lineage {owner}: its owner is not among its members")
+    return members
+
+
+def _require_owner_worktree(journal: Journal, registry: Registry) -> None:
+    """The only worktree a cleanup removes is the owner's own: ``<runs>/<owner>/wt``."""
+    expected = registry.runs_root / journal.owner / "wt"
+    if journal.worktree != expected:
+        raise RetireRefused(
+            f"lineage {journal.owner}: the journal's worktree is {journal.worktree}, "
+            f"expected {expected}"
+        )
+
+
 def inspect(
     *,
     state: Path,
@@ -356,9 +386,7 @@ def inspect(
     if not RUN_ID_PATTERN.fullmatch(owner):
         raise Unknown(f"not a lineage owner: {owner!r}")
     current = lineages.load(state, owner)
-    members = tuple(sorted(current.members))
-    if not all(RUN_ID_PATTERN.fullmatch(member) for member in members):
-        raise Unknown(f"lineage {owner}: a member id is malformed")
+    members = _members_of(current, owner)
     if current.branch != f"ha/{owner}":
         raise RetireRefused(f"lineage {owner}: branch {current.branch!r}, expected ha/{owner}")
     try:
@@ -479,6 +507,60 @@ def _intact(saved: Saved | None, state: Path) -> bool:
     return path.is_file() and sha256_of(path) == saved.sha256
 
 
+def _unsaved_revisions(
+    journal: Journal, tip: str, *, state: Path, environ: Mapping[str, str]
+) -> list[str] | None:
+    """What ``git bundle create`` must pack to save the branch's commits, or ``None``
+    when the branch holds no commit that is not saved elsewhere."""
+    ref = f"refs/heads/{journal.branch}"
+    if journal.base is not None:
+        return None if tip == journal.base else [f"{journal.base}..{ref}"]
+    # No base was ever resolved: only the commits no other branch or tag holds are the
+    # branch's own; a tip another ref holds is saved already.
+    holders = git(
+        journal.repository,
+        ["for-each-ref", "--contains", tip, "--format=%(refname)", "refs/heads", "refs/tags"],
+        environ,
+        state=state,
+    )
+    if holders.returncode != 0:
+        raise RetireRefused(f"save_residue: git for-each-ref failed: {holders.stderr.strip()}")
+    if any(name != ref for name in holders.stdout.split()):
+        return None
+    # ``--exclude`` patterns for ``--branches`` are relative to ``refs/heads/``.
+    return [ref, "--not", f"--exclude={journal.branch}", "--branches", "--tags"]
+
+
+def _save_bundle(
+    journal: Journal,
+    tip: str,
+    revisions: Sequence[str],
+    directory: Path,
+    *,
+    state: Path,
+    environ: Mapping[str, str],
+) -> Saved:
+    target = directory / "commits.bundle"
+    ref = f"refs/heads/{journal.branch}"
+
+    def write_bundle(path: Path) -> None:
+        result = git(
+            journal.repository, ["bundle", "create", str(path), *revisions], environ, state=state
+        )
+        if result.returncode != 0:
+            raise RetireRefused(f"save_residue: git bundle failed: {result.stderr.strip()}")
+        # The ref may have moved since the journal recorded its tip: what is deleted
+        # later is that tip, so the bundle must hold exactly it.
+        heads = git(journal.repository, ["bundle", "list-heads", str(path)], environ, state=state)
+        if f"{tip} {ref}" not in heads.stdout.splitlines():
+            raise RetireRefused(
+                f"save_residue: expected the bundle to hold {ref} at {tip}; "
+                f"it lists {heads.stdout.strip() or 'nothing'}"
+            )
+
+    return Saved(str(target.relative_to(state)), _write_atomically(target, write_bundle))
+
+
 def save_residue(journal: Journal, *, state: Path, environ: Mapping[str, str]) -> Journal:
     """Step 1: the worktree as a tar.gz archive (no git in it), the commits as a bundle.
 
@@ -504,25 +586,11 @@ def save_residue(journal: Journal, *, state: Path, environ: Mapping[str, str]) -
 
         archive = Saved(str(target.relative_to(state)), _write_atomically(target, write_archive))
     bundle = journal.bundle if _intact(journal.bundle, state) else None
-    if (
-        bundle is None
-        and journal.tip is not None
-        and journal.base is not None
-        and journal.tip != journal.base
-    ):
-        target = directory / "commits.bundle"
-
-        def write_bundle(path: Path) -> None:
-            result = git(
-                journal.repository,
-                ["bundle", "create", str(path), f"{journal.base}..refs/heads/{journal.branch}"],
-                environ,
-                state=state,
-            )
-            if result.returncode != 0:
-                raise RetireRefused(f"save_residue: git bundle failed: {result.stderr.strip()}")
-
-        bundle = Saved(str(target.relative_to(state)), _write_atomically(target, write_bundle))
+    tip = journal.tip
+    if bundle is None and tip is not None:
+        revisions = _unsaved_revisions(journal, tip, state=state, environ=environ)
+        if revisions is not None:
+            bundle = _save_bundle(journal, tip, revisions, directory, state=state, environ=environ)
     return _mark(journal, "save_residue", archive=archive, bundle=bundle)
 
 
@@ -544,10 +612,20 @@ def remove_worktree(journal: Journal, *, state: Path, environ: Mapping[str, str]
                 "remove_worktree: expected save_residue done before deleting "
                 f"{journal.worktree}; it is not"
             )
-        if journal.archive is not None and not _intact(journal.archive, state):
+        if journal.archive is None:
+            raise RetireRefused(
+                f"remove_worktree: {journal.worktree} exists but the journal records no "
+                "archive of it (it appeared after save_residue); nothing deleted"
+            )
+        if not _intact(journal.archive, state):
             raise RetireRefused(
                 f"remove_worktree: expected the archive {journal.archive.path} with sha256 "
                 f"{journal.archive.sha256}; it is missing or altered"
+            )
+        if not registered:
+            raise RetireRefused(
+                f"remove_worktree: {journal.worktree} is not a registered worktree of "
+                f"{journal.repository}; nothing deleted"
             )
         shutil.rmtree(journal.worktree)
     result = git(journal.repository, ["worktree", "prune", "--expire=now"], environ, state=state)
@@ -699,11 +777,21 @@ def retire(
                 return 1
             if journal is not None:
                 left = retry
-            members = (
-                journal.members
-                if journal is not None
-                else tuple(sorted(lineages.load(state, owner).members))
-            )
+                _require_owner_worktree(journal, registry)
+                members = journal.members
+            else:
+                members = _members_of(lineages.load(state, owner), owner)
+            if run_id not in members:
+                kept = (
+                    f"the journal {path} keeps what is done"
+                    if journal is not None
+                    else "nothing cleaned"
+                )
+                say(
+                    f"{run_id} is not a member of lineage {owner}: ha clean --force {owner} "
+                    f"retires it; {kept}"
+                )
+                return 1
             for member in members:
                 if member != run_id and not locks.is_free(registry.lifecycle_lock(member)):
                     say(f"{member} is active: {left}")
@@ -717,6 +805,7 @@ def retire(
                     environ=environ,
                     now=now,
                 )
+                _require_owner_worktree(journal, registry)
                 create_once(path, to_document(journal))
                 left = retry
                 say(f"journal: {path}")

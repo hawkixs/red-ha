@@ -74,6 +74,12 @@ def test_an_absent_journal_is_none(tmp_path: Path) -> None:
         ("version", 2),
         ("owner", "20261002T120000-0000000c"),
         ("members", ["../../etc"]),
+        ("members", []),
+        ("members", [OWNER, OWNER, MEMBER]),
+        ("members", [MEMBER]),
+        ("repository", "repo"),
+        ("common_dir", ".git"),
+        ("worktree", "runs/wt"),
         ("branch", "main"),
         ("tip", "not-a-sha"),
         ("lifted_at", "yesterday"),
@@ -351,6 +357,56 @@ def test_a_saved_archive_is_kept_when_the_worktree_is_gone(world: World) -> None
     assert again.archive == saved.archive
 
 
+def _advance(world: World, owner: str) -> str:
+    """Move ``ha/<owner>`` one commit ahead, as another process would."""
+    branch = f"ha/{owner}"
+    tip = _git(
+        world.repo, "commit-tree", f"{branch}^{{tree}}", "-p", branch, "-m", "elsewhere"
+    ).strip()
+    _git(world.repo, "update-ref", f"refs/heads/{branch}", tip)
+    return tip
+
+
+def test_a_journal_without_a_base_still_bundles_the_unique_commits(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = replace(_inspect(world, owner), base=None)
+    saved = retire.save_residue(journal, state=world.state, environ=_environ(world))
+    assert saved.bundle is not None
+    heads = _git(world.repo, "bundle", "list-heads", str(world.state / saved.bundle.path))
+    assert heads.split() == [journal.tip, f"refs/heads/ha/{owner}"]
+
+
+def test_a_journal_without_a_base_needs_no_bundle_when_another_ref_holds_the_tip(
+    world: World,
+) -> None:
+    owner = _compromised_write(world)
+    _git(world.repo, "branch", "keeper", f"ha/{owner}")
+    journal = replace(_inspect(world, owner), base=None)
+    assert retire.save_residue(journal, state=world.state, environ=_environ(world)).bundle is None
+
+
+def test_force_saves_the_commits_of_a_lineage_whose_base_was_never_resolved(world: World) -> None:
+    owner = _compromised_write(world)
+    lineage.save(world.state, replace(lineage.load(world.state, owner), base=None))
+    assert _force(world, owner) == 0
+    assert (retire.residue_dir(world.state, owner) / "commits.bundle").is_file()
+    assert (
+        retire.branch_tip(world.repo, f"ha/{owner}", state=world.state, environ=_environ(world))
+        is None
+    )
+
+
+def test_a_bundle_that_does_not_hold_the_recorded_tip_is_refused_and_removed(
+    world: World,
+) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    _advance(world, owner)
+    with pytest.raises(retire.RetireRefused, match="bundle"):
+        retire.save_residue(journal, state=world.state, environ=_environ(world))
+    assert [p.name for p in retire.residue_dir(world.state, owner).glob("*bundle*")] == []
+
+
 def test_a_stale_bundle_lock_does_not_block_a_resume(world: World) -> None:
     owner = _compromised_write(world)
     journal = _inspect(world, owner)
@@ -366,6 +422,32 @@ def test_remove_worktree_refuses_when_the_residue_was_not_saved(world: World) ->
     with pytest.raises(retire.RetireRefused, match="save_residue"):
         retire.remove_worktree(journal, state=world.state, environ=_environ(world))
     assert journal.worktree.exists()
+
+
+def test_remove_worktree_refuses_a_worktree_that_appeared_after_save_residue(
+    world: World,
+) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    shutil.rmtree(journal.worktree)
+    saved = retire.save_residue(journal, state=world.state, environ=_environ(world))
+    assert saved.archive is None
+    saved.worktree.mkdir()
+    (saved.worktree / "unsaved.txt").write_text("never archived\n")
+    with pytest.raises(retire.RetireRefused, match="no archive"):
+        retire.remove_worktree(saved, state=world.state, environ=_environ(world))
+    assert (saved.worktree / "unsaved.txt").exists()
+
+
+def test_remove_worktree_refuses_a_directory_git_does_not_register(world: World) -> None:
+    saved = _saved_residue(world)
+    parked = saved.worktree.with_name("parked")
+    saved.worktree.rename(parked)
+    _git(world.repo, "worktree", "prune", "--expire=now")
+    parked.rename(saved.worktree)
+    with pytest.raises(retire.RetireRefused, match="not a registered worktree"):
+        retire.remove_worktree(saved, state=world.state, environ=_environ(world))
+    assert (saved.worktree / "app.py").exists()
 
 
 @pytest.mark.parametrize("damage", ["missing", "altered"])
@@ -818,3 +900,190 @@ def test_a_keep_branch_mismatch_names_the_flag_to_retry_with(
     refusal = next(line for line in world.said if "was started with" in line)
     assert refusal.endswith(f"retry ha clean --force {owner} --keep-branch")
     assert "nothing cleaned" not in refusal
+
+
+def _nothing_cleaned(world: World, owner: str) -> None:
+    assert retire.load_journal(world.state, owner) is None
+    assert lineage.load(world.state, owner).worktree.is_dir()
+    assert retire.branch_tip(world.repo, f"ha/{owner}", state=world.state, environ=_environ(world))
+    assert lineage.lineage_path(world.state, owner).exists()
+
+
+def test_a_member_id_is_validated_before_any_lock_is_probed(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+    path = lineage.lineage_path(world.state, owner)
+    document = json.loads(path.read_text())
+    document["members"]["../../escape"] = "failed"
+    path.write_text(json.dumps(document))
+    probed: list[Path] = []
+    monkeypatch.setattr(locks, "is_free", lambda lock: probed.append(lock) or True)
+    assert _force(world, owner) == 1
+    assert probed == []
+    assert any("member id is malformed" in line for line in world.said)
+    assert retire.load_journal(world.state, owner) is None
+
+
+def test_a_resumed_journal_naming_another_worktree_deletes_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+
+    def crash(at: str) -> None:
+        if at == "save_residue":
+            raise SystemExit("crashed")
+
+    monkeypatch.setattr(retire, "_crash_after", crash)
+    with pytest.raises(SystemExit):
+        _force(world, owner)
+    monkeypatch.setattr(retire, "_crash_after", lambda at: None)
+    elsewhere = world.home / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.txt").write_text("not ha's\n")
+    path = retire.journal_path(world.state, owner)
+    document = json.loads(path.read_text())
+    document["worktree"] = str(elsewhere)
+    path.write_text(json.dumps(document))
+    assert _force(world, owner) == 1
+    assert (elsewhere / "keep.txt").exists()
+    assert any("worktree" in line and str(elsewhere) in line for line in world.said)
+    assert lineage.load(world.state, owner).worktree.is_dir()
+
+
+def test_inspection_refuses_a_lineage_that_does_not_list_its_owner(world: World) -> None:
+    owner = _compromised_write(world)
+    other = "20261002T140000-0000000c"
+    path = lineage.lineage_path(world.state, owner)
+    document = json.loads(path.read_text())
+    document["members"] = {other: "committed"}
+    path.write_text(json.dumps(document))
+    with pytest.raises(retire.RetireRefused, match="not among its members"):
+        _inspect(world, owner)
+
+
+def test_a_run_outside_the_lineage_is_pointed_at_its_owner(world: World) -> None:
+    owner = _compromised_write(world)
+    stray = "20261002T140000-0000000c"
+    world.registry().create(
+        stray,
+        run_dir=None,
+        target={"kind": "provider", "name": "codex"},
+        repository=world.repo,
+        lineage=owner,
+    )
+    assert _force(world, stray) == 1
+    refusal = " ".join(world.said)
+    assert f"{stray} is not a member" in refusal and f"ha clean --force {owner}" in refusal
+    assert refusal.endswith("nothing cleaned")
+    _nothing_cleaned(world, owner)
+
+
+def test_a_lineage_naming_another_repository_refuses_and_cleans_nothing(world: World) -> None:
+    owner = _compromised_write(world)
+    state = lineage.load(world.state, owner)
+    lineage.save(world.state, replace(state, repository=world.home / "elsewhere"))
+    assert _force(world, owner) == 1
+    assert any("repository" in line and line.endswith("nothing cleaned") for line in world.said)
+    assert retire.load_journal(world.state, owner) is None
+    assert state.worktree.is_dir()
+
+
+def test_a_lineage_file_of_another_owner_refuses_and_cleans_nothing(world: World) -> None:
+    owner = _compromised_write(world)
+    path = lineage.lineage_path(world.state, owner)
+    document = json.loads(path.read_text())
+    document["owner"] = "20261002T140000-0000000c"
+    path.write_text(json.dumps(document))
+    assert _force(world, owner) == 1
+    assert any(line.endswith("nothing cleaned") for line in world.said)
+    assert retire.load_journal(world.state, owner) is None
+
+
+def test_an_owner_entry_naming_another_lineage_refuses_and_cleans_nothing(world: World) -> None:
+    owner = _compromised_write(world)
+    member = "20261002T140000-0000000c"
+    _add_member(world, owner, member)
+    world.registry().create(
+        member,
+        run_dir=None,
+        target={"kind": "provider", "name": "codex"},
+        repository=world.repo,
+        lineage=owner,
+    )
+    record = world.state / "runs" / f"{owner}.json"
+    document = json.loads(record.read_text())
+    document["lineage"] = "20261002T150000-0000000d"
+    record.write_text(json.dumps(document))
+    assert _force(world, member) == 1
+    assert any("the owner's entry names lineage" in line for line in world.said)
+    _nothing_cleaned(world, owner)
+
+
+def test_a_symlinked_run_directory_refuses_before_any_git(world: World) -> None:
+    owner = _compromised_write(world)
+    run_dir = lineage.load(world.state, owner).worktree.parent
+    moved = run_dir.with_name("moved")
+    run_dir.rename(moved)
+    run_dir.symlink_to(moved)
+    world.git_calls.clear()
+    assert _force(world, owner) == 1
+    assert any("symbolic link" in line and line.endswith("nothing cleaned") for line in world.said)
+    assert world.git_calls == []
+    assert (moved / "wt").is_dir()
+    assert retire.load_journal(world.state, owner) is None
+
+
+def test_a_branch_moved_between_the_check_and_the_delete_survives(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+    real = retire.branch_tip
+    calls: list[str] = []
+    moved: list[str] = []
+
+    def racing(repository: Path, branch: str, **kwargs: object) -> str | None:
+        found = real(repository, branch, **kwargs)  # type: ignore[arg-type]
+        calls.append(branch)
+        if len(calls) == 2:  # delete_branch's own check, right before update-ref
+            moved.append(_advance(world, owner))
+        return found
+
+    monkeypatch.setattr(retire, "branch_tip", racing)
+    assert _force(world, owner) == 1
+    assert _git(world.repo, "rev-parse", f"ha/{owner}").strip() == moved[0]
+    assert any(f"expected ha/{owner} at" in line and moved[0] in line for line in world.said)
+    journal = retire.load_journal(world.state, owner)
+    assert journal is not None and journal.steps["delete_branch"] is False
+
+
+def test_a_branch_checked_out_elsewhere_after_inspection_is_kept(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+    other = world.home / "other"
+
+    def occupy(at: str) -> None:
+        if at == "remove_worktree":
+            _git(world.repo, "worktree", "add", "-q", str(other), f"ha/{owner}")
+
+    monkeypatch.setattr(retire, "_crash_after", occupy)
+    assert _force(world, owner) == 1
+    assert any(f"ha/{owner} is checked out in {other}" in line for line in world.said)
+    assert _git(world.repo, "rev-parse", "--verify", f"ha/{owner}").strip()
+    journal = retire.load_journal(world.state, owner)
+    assert journal is not None
+    assert journal.steps["remove_worktree"] is True and journal.steps["delete_branch"] is False
+
+
+def test_a_stale_unconfined_intent_is_lifted_and_a_new_write_is_admitted(world: World) -> None:
+    owner = _compromised_write(world)
+    intent = world.state / write_flow.UNCONFINED_INTENT
+    intent.write_text(json.dumps({"run_id": owner}))
+    assert _force(world, owner) == 0
+    journal = retire.load_journal(world.state, owner)
+    assert journal is not None
+    assert not intent.exists()
+    assert intent.with_name(f"{intent.name}.lifted-{journal.lifted_at}").exists()
+    world.agent.edit = _edit_app
+    assert world.write().exit_code == 0
