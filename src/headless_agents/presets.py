@@ -8,12 +8,16 @@ operator to fill, or ``models.toml`` decides.
 from __future__ import annotations
 
 import os
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Final
 
-ROLES_TOML: Final = """\
-# Role presets written by `ha init`. No model is named: put each tier's model on the
-# commented line, or let models.toml decide. Edit freely; `ha init` never overwrites.
+_VERSION: Final = package_version("headless-agents")
+
+_ROLES_TEMPLATE: Final = """\
+# Role presets written by `ha init` (headless-agents {version}). Each tier hint below is a
+# commented placeholder: fill it in, or let models.toml decide. Edit freely; `ha init`
+# never overwrites.
 
 [judge]
 provider = "codex"
@@ -56,8 +60,9 @@ context  = "global"
 timeout  = 1800
 """
 
-WORKFLOWS_TOML: Final = """\
-# Workflow presets written by `ha init`; they name the roles of roles.toml.
+_WORKFLOWS_TEMPLATE: Final = """\
+# Workflow presets written by `ha init` (headless-agents {version}); they name the roles
+# of roles.toml.
 
 [build]
 shape     = "implement"
@@ -75,6 +80,9 @@ review = "reviewer-agy"
 shape  = "review"
 review = "closure"
 """
+
+ROLES_TOML: Final = _ROLES_TEMPLATE.replace("{version}", _VERSION)
+WORKFLOWS_TOML: Final = _WORKFLOWS_TEMPLATE.replace("{version}", _VERSION)
 
 PRESET_FILES: Final[tuple[tuple[str, str], ...]] = (
     ("roles.toml", ROLES_TOML),
