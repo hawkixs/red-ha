@@ -12,12 +12,14 @@ import subprocess
 import sys
 import tarfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from headless_agents import engine, lineage, quarantine, retire, write_flow
+from headless_agents import engine, lineage, locks, quarantine, retire, write_flow
 from headless_agents.engine import UsageError
 from headless_agents.state import Unknown
 from tests.unit.headless_agents.test_write_flow import World, _edit_app, _git, world  # noqa: F401
@@ -517,6 +519,33 @@ def test_every_lift_is_synced_to_the_directory(
     assert len(synced) == len(journal.files)
 
 
+@contextmanager
+def _holding(world: World, lock: Path, name: str) -> Iterator[None]:
+    """Another process holds ``lock`` exclusively: a second lock of the same rank taken
+    in this process would trip ``locks._check_order`` instead of testing the probe."""
+    from tests.unit.headless_agents.test_write_flow import _HOLD
+
+    ready = world.home / f"ready-{name}"
+    holder = subprocess.Popen([sys.executable, "-c", _HOLD, str(lock), "ex", str(ready)])
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists():
+            assert holder.poll() is None, "the lock holder died"
+            assert time.monotonic() < deadline, "the lock holder never became ready"
+            time.sleep(0.02)
+        yield
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+def _add_member(world: World, owner: str, member: str) -> None:
+    path = lineage.lineage_path(world.state, owner)
+    document = json.loads(path.read_text())
+    document["members"][member] = "committed"
+    path.write_text(json.dumps(document))
+
+
 def _force(world: World, run_id: str, **kwargs: bool) -> int:
     return engine.clean(
         run_id,
@@ -621,15 +650,49 @@ def test_git_tampered_leaves_the_step_undone_and_the_retry_succeeds(
     assert _force(world, owner) == 0
 
 
-def test_timeout_leaves_the_step_undone(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_step_timeout_leaves_the_step_undone(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
     owner = _compromised_write(world)
+    real = retire.git
 
-    def slow(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
-        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+    def slow(root: Path, args: list[str], environ: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        if args[:1] == ["bundle"]:
+            raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+        return real(root, args, environ, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(retire, "git", slow)
     assert _force(world, owner) == 1
-    assert any("TimeoutExpired" in line for line in world.said)
+    journal = retire.load_journal(world.state, owner)
+    assert journal is not None and journal.steps["save_residue"] is False
+    assert any("save_residue: TimeoutExpired" in line for line in world.said)
+    assert any(f"retry ha clean --force {owner}" in line for line in world.said)
+
+
+def test_an_unreadable_journal_is_named_and_left_to_the_operator(world: World) -> None:
+    owner = _compromised_write(world)
+    path = retire.journal_path(world.state, owner)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    assert _force(world, owner) == 1
+    refusal = " ".join(world.said)
+    assert str(path) in refusal and "recover it by hand" in refusal
+    assert "nothing cleaned" not in refusal
+
+
+def test_a_step_time_unknown_keeps_the_journal_sentence_only(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+
+    def unreadable(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        raise Unknown("a state file is unreadable")
+
+    monkeypatch.setattr(retire, "save_residue", unreadable)
+    assert _force(world, owner) == 1
+    refusal = " ".join(world.said)
+    assert f"retry ha clean --force {owner}" in refusal
+    assert "recover it by hand" not in refusal
 
 
 def test_keep_branch_must_match_the_journal_on_resume(
@@ -646,34 +709,63 @@ def test_keep_branch_must_match_the_journal_on_resume(
         _force(world, owner)
     monkeypatch.setattr(retire, "_crash_after", lambda at: None)
     assert _force(world, owner, keep_branch=True) == 1
-    assert any("--keep-branch" in line for line in world.said)
+    refusal = next(line for line in world.said if "was started with" in line)
+    assert "keep_branch=False" in refusal and refusal.endswith(f"retry ha clean --force {owner}")
 
 
 def test_another_active_member_refuses(world: World) -> None:
-    """Only RUN's lifecycle lock is taken (rank order); every other member is probed
-    with locks.is_free. A held lock must come from ANOTHER process: a second LIFECYCLE
-    lock in this process would trip locks._check_order, not test the probe."""
-    from tests.unit.headless_agents.test_write_flow import _HOLD
-
     owner = _compromised_write(world)
     other = "20261002T140000-0000000c"
-    path = lineage.lineage_path(world.state, owner)
-    document = json.loads(path.read_text())
-    document["members"][other] = "committed"
-    path.write_text(json.dumps(document))
-    ready = world.home / "ready-member"
-    holder = subprocess.Popen(
-        [sys.executable, "-c", _HOLD, str(world.registry().lifecycle_lock(other)), "ex", str(ready)]
-    )
-    try:
-        while not ready.exists():
-            time.sleep(0.02)
+    _add_member(world, owner, other)
+    with _holding(world, world.registry().lifecycle_lock(other), "member"):
         assert _force(world, owner) == 1
-    finally:
-        holder.kill()
-        holder.wait()
     assert any(f"{other} is active" in line for line in world.said)
     assert retire.load_journal(world.state, owner) is None, "nothing journaled, nothing cleaned"
+
+
+def test_an_active_member_on_resume_names_the_journal(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+    other = "20261002T140000-0000000c"
+    _add_member(world, owner, other)
+
+    def crash(at: str) -> None:
+        if at == "save_residue":
+            raise SystemExit("crashed")
+
+    monkeypatch.setattr(retire, "_crash_after", crash)
+    with pytest.raises(SystemExit):
+        _force(world, owner)
+    monkeypatch.setattr(retire, "_crash_after", lambda at: None)
+    with _holding(world, world.registry().lifecycle_lock(other), "member"):
+        assert _force(world, owner) == 1
+    refusal = next(line for line in world.said if f"{other} is active" in line)
+    assert "nothing cleaned" not in refusal
+    assert str(retire.journal_path(world.state, owner)) in refusal
+
+
+def test_a_lineage_lock_timeout_is_a_usage_error_and_writes_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+    monkeypatch.setattr(locks, "LOCK_WAIT_SECONDS", 0.2)
+    with _holding(world, lineage.lineage_lock(world.state, owner), "lineage"):
+        with pytest.raises(UsageError, match="the lineage is in use; nothing cleaned"):
+            _force(world, owner)
+    assert retire.load_journal(world.state, owner) is None
+
+
+def test_a_healthy_lineage_is_refused_by_force_and_left_untouched(world: World) -> None:
+    world.agent.edit = _edit_app
+    owner = world.write().run_id
+    worktree = lineage.load(world.state, owner).worktree
+    assert _force(world, owner) == 1
+    assert any(f"ha clean {owner}" in line for line in world.said)
+    assert any(line.endswith("; nothing cleaned") for line in world.said)
+    assert retire.load_journal(world.state, owner) is None
+    assert worktree.is_dir()
+    assert retire.branch_tip(world.repo, f"ha/{owner}", state=world.state, environ=_environ(world))
 
 
 def test_an_inspection_refusal_says_nothing_was_cleaned(world: World) -> None:
@@ -697,3 +789,32 @@ def test_keep_branch_without_force_is_a_usage_error(world: World) -> None:
             say=world.said.append,
             keep_branch=True,
         )
+
+
+def test_a_completed_journal_answers_already_cleaned_whatever_keep_branch_says(
+    world: World,
+) -> None:
+    owner = _compromised_write(world)
+    assert _force(world, owner) == 0
+    world.said.clear()
+    assert _force(world, owner, keep_branch=True) == 0
+    assert any("already cleaned" in line for line in world.said)
+
+
+def test_a_keep_branch_mismatch_names_the_flag_to_retry_with(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+
+    def crash(at: str) -> None:
+        if at == "save_residue":
+            raise SystemExit("crashed")
+
+    monkeypatch.setattr(retire, "_crash_after", crash)
+    with pytest.raises(SystemExit):
+        _force(world, owner, keep_branch=True)
+    monkeypatch.setattr(retire, "_crash_after", lambda at: None)
+    assert _force(world, owner) == 1
+    refusal = next(line for line in world.said if "was started with" in line)
+    assert refusal.endswith(f"retry ha clean --force {owner} --keep-branch")
+    assert "nothing cleaned" not in refusal

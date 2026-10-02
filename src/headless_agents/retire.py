@@ -689,9 +689,16 @@ def retire(
         )
         step = "inspection"
         # What a failure leaves behind: nothing before the journal exists, else the journal.
+        retry = f"the journal {path} keeps what is done; retry ha clean --force {run_id}"
         left = "nothing cleaned"
         try:
-            journal = load_journal(state, owner)
+            try:
+                journal = load_journal(state, owner)
+            except Unknown as exc:
+                say(f"{exc}: the journal {path} is unreadable; recover it by hand")
+                return 1
+            if journal is not None:
+                left = retry
             members = (
                 journal.members
                 if journal is not None
@@ -699,7 +706,7 @@ def retire(
             )
             for member in members:
                 if member != run_id and not locks.is_free(registry.lifecycle_lock(member)):
-                    say(f"{member} is active: nothing cleaned")
+                    say(f"{member} is active: {left}")
                     return 1
             if journal is None:
                 journal = inspect(
@@ -711,17 +718,18 @@ def retire(
                     now=now,
                 )
                 create_once(path, to_document(journal))
+                left = retry
                 say(f"journal: {path}")
-            elif journal.keep_branch != keep_branch:
-                say(
-                    f"the journal {path} was started with keep_branch={journal.keep_branch}: "
-                    "resume with the same --keep-branch; nothing more cleaned"
-                )
-                return 1
-            left = f"the journal {path} keeps what is done; retry ha clean --force {run_id}"
-            if journal.completed:
+            elif journal.completed:
                 say(f"lineage {owner} already cleaned (journal {path})")
                 return 0
+            elif journal.keep_branch != keep_branch:
+                flag = " --keep-branch" if journal.keep_branch else ""
+                say(
+                    f"the journal {path} was started with keep_branch={journal.keep_branch}; "
+                    f"retry ha clean --force {run_id}{flag}"
+                )
+                return 1
             for step in STEPS:
                 if journal.steps[step]:
                     continue
@@ -733,7 +741,7 @@ def retire(
             say(f"{exc}; {left}")
             return 1
         except Unknown as exc:
-            say(f"{exc}: recover it by hand; {left}")
+            say(f"{exc}; {left}" if left == retry else f"{exc}: recover it by hand; {left}")
             return 1
         except (GitTampered, subprocess.TimeoutExpired, OSError) as exc:
             say(f"{step}: {type(exc).__name__}: {exc}; {left}")

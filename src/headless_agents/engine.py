@@ -1798,16 +1798,20 @@ def clean(
                     f"{run_id} is not a write run: --force retires a lineage; "
                     f"ha clean {run_id} cleans it"
                 )
-            return retire.retire(
-                run_id,
-                owner=owner,
-                state=state,
-                registry=registry,
-                environ=operator_environment(environ),
-                say=say,
-                keep_branch=keep_branch,
-                now=time.strftime(retire.LIFT_FORMAT, time.gmtime()),
-            )
+            try:
+                return retire.retire(
+                    run_id,
+                    owner=owner,
+                    state=state,
+                    registry=registry,
+                    environ=operator_environment(environ),
+                    say=say,
+                    keep_branch=keep_branch,
+                    now=time.strftime(retire.LIFT_FORMAT, time.gmtime()),
+                )
+            except LockTimeout as exc:
+                # Both lineage locks are taken before anything is written.
+                raise UsageError(f"{exc}: the lineage is in use; nothing cleaned") from None
         assert entry is not None
         if entry.lineage is not None:
             try:
