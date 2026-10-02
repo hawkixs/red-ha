@@ -62,6 +62,8 @@ deferred from 0.5.3 ride along. **After installing: `ha prove --stale`.**
   with their status and names the file to create (exit 0 when one list is available).
 - Quarantine and lineage refusals name `ha clean --force`; the README keeps the manual
   procedure as the fallback when the cleanup itself refuses.
+- `requires-python` is now `>=3.12.7`: the `ha` CLI's argument parsing fails on 3.12.0-3.12.6
+  (44 CLI tests fail on 3.12.6, all pass on 3.12.7; brain ticket d7b25aa8).
 
 ### Fixed
 
