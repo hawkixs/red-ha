@@ -11,7 +11,7 @@
     ha runs [--limit N] [--json]
     ha show RUN_ID [--json]
     ha show --dir PATH [--json]               display only
-    ha clean RUN_ID
+    ha clean RUN_ID [--force [--keep-branch]]
     ha prove [RAIL...] [--isolation] [--confinement] [--stale] [--keep] [--json]
     ha --version
 
@@ -290,6 +290,17 @@ def _parser() -> argparse.ArgumentParser:
 
     clean_parser = commands.add_parser("clean", help="remove one run's directory")
     clean_parser.add_argument("run_id", help="the run id, as ha run printed it")
+    clean_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="retire a compromised, pending or quarantined lineage after inspection "
+        "(journaled, resumable)",
+    )
+    clean_parser.add_argument(
+        "--keep-branch",
+        action="store_true",
+        help="with --force: keep the branch ha/<owner>",
+    )
 
     prove_parser = commands.add_parser(
         "prove",
@@ -1076,7 +1087,14 @@ def _runs(args: argparse.Namespace, io: Io) -> int:
 
 
 def _clean(args: argparse.Namespace, io: Io) -> int:
-    return clean(args.run_id, environ=io.environ, home=io.home, say=io.say)
+    return clean(
+        args.run_id,
+        environ=io.environ,
+        home=io.home,
+        say=io.say,
+        force=args.force,
+        keep_branch=args.keep_branch,
+    )
 
 
 # ── ha show ─────────────────────────────────────────────────────────────────

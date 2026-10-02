@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Final
 
 from . import lineage as lineages
-from . import locks, procgroup, proof_state, review_flow, reviews, structured, write_flow
+from . import locks, procgroup, proof_state, retire, review_flow, reviews, structured, write_flow
 from .capability import scoped_environment
 from .chain import run_chain
 from .cli_models import ModelsError, model_sources_for, models_for
@@ -1728,6 +1728,8 @@ def clean(
     environ: Mapping[str, str],
     home: Path,
     say: Callable[[str], None],
+    force: bool = False,
+    keep_branch: bool = False,
 ) -> int:
     """``ha clean RUN_ID`` for a run outside any lineage (spec §3.9).
 
@@ -1738,13 +1740,23 @@ def clean(
     ``started_at``, never ``run.json`` (an entry older than that key keeps the
     report rule). A write run follows the lineage rules of
     :func:`headless_agents.write_flow.clean_write`.
+
+    ``force=True`` retires an uncertain lineage (spec 0.5.4 §3): the global admission
+    is taken exclusive, then :func:`headless_agents.retire.retire` runs the journaled
+    cleanup. ``keep_branch`` applies to ``force`` only.
     """
+    if keep_branch and not force:
+        raise UsageError("--keep-branch applies to --force only; nothing cleaned")
     state = state_dir(environ, home=home)
     registry = Registry(state, runs_root=runs_root(home))
+    resumed_owner: str | None = None
     try:
-        entry = registry.resolve(run_id)
+        entry: Entry | None = registry.resolve(run_id)
     except RegistryError as exc:
-        raise UsageError(str(exc)) from None
+        resumed_owner = retire.find_owner(state, run_id) if force else None
+        if resumed_owner is None:
+            raise UsageError(str(exc)) from None
+        entry = None
     except Unknown as exc:
         say(f"{exc}: recover it by hand; nothing cleaned")
         return 1
@@ -1768,7 +1780,7 @@ def clean(
             # itself happened to be free.
             held_locks.enter_context(
                 locks.admit_global(
-                    state, exclusive=False, wait=locks.AdmissionWait(None), label="clean"
+                    state, exclusive=force, wait=locks.AdmissionWait(None), label="clean"
                 )
             )
         except LockTimeout as exc:
@@ -1776,7 +1788,27 @@ def clean(
                 raise UsageError(
                     "a waiting unconfined writer is ahead in the admission queue: nothing cleaned"
                 ) from None
+            if force:
+                raise UsageError("runs still hold the global lock: nothing cleaned") from None
             raise UsageError("an unconfined write is running: nothing cleaned") from None
+        if force:
+            owner = resumed_owner or (entry.lineage if entry is not None else None)
+            if owner is None:
+                raise UsageError(
+                    f"{run_id} is not a write run: --force retires a lineage; "
+                    f"ha clean {run_id} cleans it"
+                )
+            return retire.retire(
+                run_id,
+                owner=owner,
+                state=state,
+                registry=registry,
+                environ=operator_environment(environ),
+                say=say,
+                keep_branch=keep_branch,
+                now=time.strftime(retire.LIFT_FORMAT, time.gmtime()),
+            )
+        assert entry is not None
         if entry.lineage is not None:
             try:
                 return write_flow.clean_write(

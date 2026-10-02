@@ -21,17 +21,20 @@ import hashlib
 import os
 import re
 import shutil
+import subprocess
 import tarfile
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Final
 
 from . import lineage as lineages
-from . import quarantine
+from . import locks, quarantine
+from .git_tripwire import GitTampered
 from .gitops import git
 from .runs import RUN_ID_PATTERN, Registry, RegistryError
-from .state import Unknown, _fsync_dir, ensure_dir, read, read_optional
+from .state import Unknown, _fsync_dir, create_once, ensure_dir, publish, read, read_optional
 from .write_flow import UNCONFINED_INTENT
 
 JOURNAL_DIR: Final = "cleanups"
@@ -630,3 +633,114 @@ def lift_files(journal: Journal, *, state: Path) -> Journal:
             f"target {'present' if os.path.lexists(target) else 'absent'}"
         )
     return _mark(journal, "lift_files", completed=True)
+
+
+def _crash_after(step: str) -> None:
+    """A test hook: monkeypatched to raise after a step; does nothing in production."""
+
+
+def _run_step(name: str, journal: Journal, *, state: Path, environ: Mapping[str, str]) -> Journal:
+    if name == "save_residue":
+        return save_residue(journal, state=state, environ=environ)
+    if name == "remove_worktree":
+        return remove_worktree(journal, state=state, environ=environ)
+    if name == "delete_branch":
+        return delete_branch(journal, state=state, environ=environ)
+    return lift_files(journal, state=state)
+
+
+def retire(
+    run_id: str,
+    *,
+    owner: str,
+    state: Path,
+    registry: Registry,
+    environ: Mapping[str, str],
+    say: Callable[[str], None],
+    keep_branch: bool,
+    now: str,
+) -> int:
+    """Spec §3.2-3.5 under the registry lock, then the lineage lock, both exclusive.
+
+    The caller holds the run's lifecycle lock and the global admission exclusive.
+    Exit 0 when the lineage is retired (or already was), 1 when a step refused: the
+    journal keeps what is done, and the next ``ha clean --force`` resumes it.
+    """
+    path = journal_path(state, owner)
+    with ExitStack() as held_locks:
+        held_locks.enter_context(
+            locks.held(
+                lineages.registry_lock(state),
+                rank=locks.Rank.LINEAGE_REGISTRY,
+                exclusive=True,
+                wait=locks.LOCK_WAIT_SECONDS,
+                what="the lineage registry lock",
+            )
+        )
+        held_locks.enter_context(
+            locks.held(
+                lineages.lineage_lock(state, owner),
+                rank=locks.Rank.LINEAGE,
+                exclusive=True,
+                wait=locks.LOCK_WAIT_SECONDS,
+                what=f"the lineage lock of {owner}",
+                key=owner,
+            )
+        )
+        step = "inspection"
+        # What a failure leaves behind: nothing before the journal exists, else the journal.
+        left = "nothing cleaned"
+        try:
+            journal = load_journal(state, owner)
+            members = (
+                journal.members
+                if journal is not None
+                else tuple(sorted(lineages.load(state, owner).members))
+            )
+            for member in members:
+                if member != run_id and not locks.is_free(registry.lifecycle_lock(member)):
+                    say(f"{member} is active: nothing cleaned")
+                    return 1
+            if journal is None:
+                journal = inspect(
+                    state=state,
+                    registry=registry,
+                    owner=owner,
+                    keep_branch=keep_branch,
+                    environ=environ,
+                    now=now,
+                )
+                create_once(path, to_document(journal))
+                say(f"journal: {path}")
+            elif journal.keep_branch != keep_branch:
+                say(
+                    f"the journal {path} was started with keep_branch={journal.keep_branch}: "
+                    "resume with the same --keep-branch; nothing more cleaned"
+                )
+                return 1
+            left = f"the journal {path} keeps what is done; retry ha clean --force {run_id}"
+            if journal.completed:
+                say(f"lineage {owner} already cleaned (journal {path})")
+                return 0
+            for step in STEPS:
+                if journal.steps[step]:
+                    continue
+                journal = _run_step(step, journal, state=state, environ=environ)
+                publish(path, to_document(journal))
+                say(f"{step}: done")
+                _crash_after(step)
+        except RetireRefused as exc:
+            say(f"{exc}; {left}")
+            return 1
+        except Unknown as exc:
+            say(f"{exc}: recover it by hand; {left}")
+            return 1
+        except (GitTampered, subprocess.TimeoutExpired, OSError) as exc:
+            say(f"{step}: {type(exc).__name__}: {exc}; {left}")
+            return 1
+    residue = [s.path for s in (journal.archive, journal.bundle) if s is not None]
+    say(
+        f"lineage {owner} retired; residue: {', '.join(residue) or 'none'} under {state}; "
+        f"run directories kept: {', '.join(str(registry.runs_root / m) for m in journal.members)}"
+    )
+    return 0

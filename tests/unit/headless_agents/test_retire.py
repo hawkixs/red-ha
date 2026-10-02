@@ -8,13 +8,17 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tarfile
+import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from headless_agents import lineage, quarantine, retire, write_flow
+from headless_agents import engine, lineage, quarantine, retire, write_flow
+from headless_agents.engine import UsageError
 from headless_agents.state import Unknown
 from tests.unit.headless_agents.test_write_flow import World, _edit_app, _git, world  # noqa: F401
 
@@ -511,3 +515,185 @@ def test_every_lift_is_synced_to_the_directory(
     monkeypatch.setattr(retire, "_fsync_dir", synced.append)
     retire.lift_files(journal, state=world.state)
     assert len(synced) == len(journal.files)
+
+
+def _force(world: World, run_id: str, **kwargs: bool) -> int:
+    return engine.clean(
+        run_id,
+        environ=_environ(world),
+        home=world.home,
+        say=world.said.append,
+        force=True,
+        **kwargs,
+    )
+
+
+def test_force_retires_a_compromised_lineage_and_a_new_write_is_admitted(world: World) -> None:
+    owner = _compromised_write(world)
+    quarantine.publish(
+        world.state,
+        "repository",
+        reason="tripwire",
+        run_id=owner,
+        paths=[],
+        common_dir=world.common_dir(),
+    )
+    assert _force(world, owner) == 0
+    journal = retire.load_journal(world.state, owner)
+    assert journal is not None and journal.completed
+    assert quarantine.check(world.state, world.common_dir()) is None
+    world.agent.edit = _edit_app
+    assert world.write().exit_code == 0
+
+
+def test_a_completed_cleanup_answers_already_cleaned(world: World) -> None:
+    owner = _compromised_write(world)
+    assert _force(world, owner) == 0
+    world.said.clear()
+    assert _force(world, owner) == 0
+    assert any("already cleaned" in line for line in world.said)
+
+
+@pytest.mark.parametrize("step", retire.STEPS)
+def test_a_crash_after_each_step_is_finished_by_the_retry(
+    world: World, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    owner = _compromised_write(world)
+
+    def crash(at: str) -> None:
+        if at == step:
+            raise SystemExit("crashed")
+
+    monkeypatch.setattr(retire, "_crash_after", crash)
+    with pytest.raises(SystemExit):
+        _force(world, owner)
+    monkeypatch.setattr(retire, "_crash_after", lambda at: None)
+    assert _force(world, owner) == 0
+    journal = retire.load_journal(world.state, owner)
+    assert journal is not None and journal.completed
+
+
+def test_a_resume_resolves_the_run_through_the_journal(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+
+    def crash(at: str) -> None:
+        if at == "delete_branch":
+            raise SystemExit("crashed")
+
+    monkeypatch.setattr(retire, "_crash_after", crash)
+    with pytest.raises(SystemExit):
+        _force(world, owner)
+    journal = retire.load_journal(world.state, owner)
+    assert journal is not None and journal.files[0].path == f"runs/{owner}.json"
+    # A crash inside lift_files, after its first rename: the run's registry entry is
+    # gone, so RUN can only be found through the journal's members.
+    os.rename(
+        world.state / f"runs/{owner}.json",
+        world.state / f"runs/{owner}.json.lifted-{journal.lifted_at}",
+    )
+    monkeypatch.setattr(retire, "_crash_after", lambda at: None)
+    assert _force(world, owner) == 0
+    finished = retire.load_journal(world.state, owner)
+    assert finished is not None and finished.completed
+
+
+def test_git_tampered_leaves_the_step_undone_and_the_retry_succeeds(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from headless_agents.git_tripwire import GitTampered
+
+    owner = _compromised_write(world)
+    real = retire.git
+    calls = {"n": 0}
+
+    def flaky(root: Path, args: list[str], environ: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        if args[:1] == ["update-ref"] and calls["n"] == 0:
+            calls["n"] += 1
+            raise GitTampered("tripwire fired")
+        return real(root, args, environ, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(retire, "git", flaky)
+    assert _force(world, owner) == 1
+    journal = retire.load_journal(world.state, owner)
+    assert journal is not None and journal.steps["delete_branch"] is False
+    assert _force(world, owner) == 0
+
+
+def test_timeout_leaves_the_step_undone(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    owner = _compromised_write(world)
+
+    def slow(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        raise subprocess.TimeoutExpired(cmd="git", timeout=1)
+
+    monkeypatch.setattr(retire, "git", slow)
+    assert _force(world, owner) == 1
+    assert any("TimeoutExpired" in line for line in world.said)
+
+
+def test_keep_branch_must_match_the_journal_on_resume(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+
+    def crash(at: str) -> None:
+        if at == "save_residue":
+            raise SystemExit("crashed")
+
+    monkeypatch.setattr(retire, "_crash_after", crash)
+    with pytest.raises(SystemExit):
+        _force(world, owner)
+    monkeypatch.setattr(retire, "_crash_after", lambda at: None)
+    assert _force(world, owner, keep_branch=True) == 1
+    assert any("--keep-branch" in line for line in world.said)
+
+
+def test_another_active_member_refuses(world: World) -> None:
+    """Only RUN's lifecycle lock is taken (rank order); every other member is probed
+    with locks.is_free. A held lock must come from ANOTHER process: a second LIFECYCLE
+    lock in this process would trip locks._check_order, not test the probe."""
+    from tests.unit.headless_agents.test_write_flow import _HOLD
+
+    owner = _compromised_write(world)
+    other = "20261002T140000-0000000c"
+    path = lineage.lineage_path(world.state, owner)
+    document = json.loads(path.read_text())
+    document["members"][other] = "committed"
+    path.write_text(json.dumps(document))
+    ready = world.home / "ready-member"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLD, str(world.registry().lifecycle_lock(other)), "ex", str(ready)]
+    )
+    try:
+        while not ready.exists():
+            time.sleep(0.02)
+        assert _force(world, owner) == 1
+    finally:
+        holder.kill()
+        holder.wait()
+    assert any(f"{other} is active" in line for line in world.said)
+    assert retire.load_journal(world.state, owner) is None, "nothing journaled, nothing cleaned"
+
+
+def test_an_inspection_refusal_says_nothing_was_cleaned(world: World) -> None:
+    owner = _compromised_write(world)
+    path = lineage.lineage_path(world.state, owner)
+    document = json.loads(path.read_text())
+    document["branch"] = "ha/other"
+    path.write_text(json.dumps(document))
+    assert _force(world, owner) == 1
+    assert any(line.endswith("; nothing cleaned") for line in world.said)
+    assert not any("the journal" in line for line in world.said)
+    assert retire.load_journal(world.state, owner) is None
+
+
+def test_keep_branch_without_force_is_a_usage_error(world: World) -> None:
+    with pytest.raises(UsageError, match="--keep-branch"):
+        engine.clean(
+            "20261002T000000-aaaaaaaa",
+            environ=_environ(world),
+            home=world.home,
+            say=world.said.append,
+            keep_branch=True,
+        )

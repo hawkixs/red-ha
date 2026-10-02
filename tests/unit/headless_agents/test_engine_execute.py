@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import io
 import json
+import os
 import subprocess
 import sys
 import time
@@ -1092,3 +1093,17 @@ def test_without_a_schema_a_text_answer_is_answered(world: World) -> None:
     report = json.loads((outcome.run_dir / "run.json").read_text())
     assert outcome.exit_code == 0 and report["status"] == "answered"
     assert report["failure_reason"] is None
+
+
+def test_force_on_a_run_outside_any_lineage_is_a_usage_error(world: World) -> None:
+    world.run("codex")
+    entry = _only_entry(world)
+    with pytest.raises(UsageError, match="not a write run"):
+        engine.clean(
+            entry.run_id,
+            environ={"PATH": os.environ["PATH"], "HOME": str(world.home)},
+            home=world.home,
+            say=world.said.append,
+            force=True,
+        )
+    assert entry.run_dir.exists()

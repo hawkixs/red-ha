@@ -1646,11 +1646,13 @@ def test_quarantine_refusal_names_manual_lift_procedure(world: World) -> None:
     assert "README.md#manually-lift-a-lineage-or-quarantine" in refusal
 
 
-def test_clean_cli_rejects_force() -> None:
+def test_clean_cli_accepts_force_and_keep_branch() -> None:
     from headless_agents import cli
 
-    with pytest.raises(SystemExit, match="2"):
-        cli._parser().parse_args(["clean", "--force", "20260927T000000-aaaaaaaa"])
+    args = cli._parser().parse_args(
+        ["clean", "--force", "--keep-branch", "20260927T000000-aaaaaaaa"]
+    )
+    assert args.force is True and args.keep_branch is True
 
 
 def test_compromised_lineage_refusal_names_manual_lift_procedure(world: World) -> None:
