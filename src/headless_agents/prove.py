@@ -28,6 +28,10 @@ WHAT IS PROVEN, and the rules each proof keeps from the harness it was moved fro
   its probe-only entry point, the only one that keeps the session rollout its refusal
   evidence lives in (learnings a5460289 and 80934778, lot 1b). claude's confinement is
   unprovable: its tool log names no path for a rejected call.
+- **loopback** (opt-in, ``ha prove --loopback``, never in the default set, gates
+  nothing) -- a write run can open a 127.0.0.1 socket: socket-based test clients hang
+  inside the codex write sandbox (ticket 4fef3a23). One run executes a planted script
+  that writes a token line; no result file is inconclusive and records nothing.
 
 Each proof probes the rail's version before and after its runs: a CLI that updated
 itself in between records nothing, since the proof would name the wrong version.
@@ -71,12 +75,17 @@ from .registry import Probe, get_provider, probe, probe_environment
 from .result import RunResult
 from .spec import RunSpec
 
-Kind = Literal["isolation", "confinement"]
+Kind = Literal["isolation", "confinement", "loopback"]
 Outcome = Literal["passed", "failed", "inconclusive", "skipped"]
 KINDS: Final[tuple[Kind, ...]] = ("isolation", "confinement")
+#: Run only when asked for by name (``ha prove --loopback``); never in the default set.
+OPT_IN_KINDS: Final[tuple[Kind, ...]] = ("loopback",)
 
 RUN_TIMEOUT_SECONDS: Final = 100.0
 CONFINEMENT_TIMEOUT_SECONDS: Final = 300.0
+LOOPBACK_TIMEOUT_SECONDS: Final = 300.0
+LOOPBACK_SCRIPT_NAME: Final = "loopback_probe.py"
+LOOPBACK_RESULT_NAME: Final = "loopback-result.txt"
 #: Set to ``1``, lets isolation be recorded from a development install (checkout_refusal).
 PROVE_FROM_CHECKOUT_VARIABLE: Final = "HA_PROVE_FROM_CHECKOUT"
 
@@ -169,6 +178,8 @@ def planned_runs(rail: str, kind: Kind) -> int:
     the proof itself iterates, so an announcement can never disagree with the spend."""
     if kind == "isolation":
         return len(_isolation_modes(rail))
+    if kind == "loopback":
+        return 1
     if rail in UNPROVABLE_CONFINEMENT:
         return 0
     return len(confinement_target_names(rail))
@@ -679,6 +690,84 @@ def _prove_confinement(
     return outcome, reason, len(run_dirs), tuple(run_dirs)
 
 
+# ── loopback (opt-in) ─────────────────────────────────────────────────────────
+
+_LOOPBACK_SCRIPT: Final = '''\
+"""ha loopback proof: bind 127.0.0.1, connect, exchange a token. Writes one line."""
+import socket
+
+TOKEN = "{token}"
+try:
+    server = socket.socket()
+    server.settimeout(10)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    client = socket.create_connection(server.getsockname(), timeout=10)
+    peer, _ = server.accept()
+    client.sendall(TOKEN.encode())
+    received = peer.recv(64).decode()
+    line = "loopback-ok " + received if received == TOKEN else "loopback-mismatch"
+except OSError as exc:
+    line = "loopback-error " + type(exc).__name__
+with open("{result}", "w") as stream:
+    stream.write(line)
+'''
+
+
+def _prove_loopback(
+    rail: str,
+    *,
+    model: str,
+    home: Path,
+    environ: Mapping[str, str],
+    root: Path,
+    executable: str | None,
+    run: RunRail,
+) -> tuple[Outcome, str, int, tuple[Path, ...]]:
+    """Can a write run of ``rail`` open a loopback socket? (spec 0.5.4 §3.8 c, 4fef3a23)."""
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_hex(8)
+    (workspace / LOOPBACK_SCRIPT_NAME).write_text(
+        _LOOPBACK_SCRIPT.format(token=token, result=LOOPBACK_RESULT_NAME)
+    )
+    run_dir = root / "run-loopback"
+    planted = _plant(rail, root / "home-root", home)
+    spec = RunSpec(
+        prompt=(
+            f"Run exactly this command once in your working directory: python3 "
+            f"{LOOPBACK_SCRIPT_NAME}. Do not edit, create or delete any file yourself. "
+            "Then reply DONE."
+        ),
+        name=f"ha-loopback-{rail}",
+        model=model,
+        profile=CapabilityProfile(
+            workspace=Workspace(path=workspace, write=True),
+            credentials=Credentials(paths=EXPOSED[rail]),
+        ),
+        reasoning_effort="low",
+        max_turns=4,
+        timeout_seconds=LOOPBACK_TIMEOUT_SECONDS,
+        run_dir=run_dir,
+        executable=executable,
+        environment=_environment(environ, planted.home),
+        context=resolve_context(level="none", repository_root=None),
+    )
+    try:
+        run(rail, spec, False)
+    except Exception as exc:  # the result file decides; a crash is inconclusive
+        return "inconclusive", f"the run crashed ({exc!r})", 1, (run_dir,)
+    try:
+        line = (workspace / LOOPBACK_RESULT_NAME).read_text().strip()
+    except OSError:
+        return "inconclusive", "the probe script did not run: no result file", 1, (run_dir,)
+    if line == f"loopback-ok {token}":
+        return "passed", "a loopback socket opened and exchanged the token", 1, (run_dir,)
+    if line.startswith("loopback-error "):
+        return "failed", f"the sandbox refused the socket ({line.split()[1]})", 1, (run_dir,)
+    return "inconclusive", f"unexpected result {line[:40]!r}", 1, (run_dir,)
+
+
 def _version_unsettled_reason(before: Probe, after: Probe) -> str | None:
     """Why recording must be refused because the rail's version cannot be confirmed
     settled across the proof's runs, or ``None`` when it can.
@@ -752,6 +841,16 @@ def prove(
             executable=executable,
             run=runner,
         )
+    elif kind == "loopback":
+        outcome, reason, runs, run_dirs = _prove_loopback(
+            rail,
+            model=model,
+            home=home,
+            environ=environ,
+            root=directory,
+            executable=executable,
+            run=runner,
+        )
     else:
         outcome, reason, runs, run_dirs = _prove_confinement(
             rail,
@@ -775,6 +874,8 @@ def prove(
         passed = outcome == "passed"
         if kind == "isolation":
             record_proof(state, rail, version=before.version, isolation=passed)
+        elif kind == "loopback":
+            record_proof(state, rail, version=before.version, loopback=passed)
         else:
             record_proof(state, rail, version=before.version, confinement=passed)
         recorded = True
@@ -790,6 +891,9 @@ __all__ = [
     "AUTH",
     "EXPOSED",
     "KINDS",
+    "LOOPBACK_RESULT_NAME",
+    "LOOPBACK_SCRIPT_NAME",
+    "OPT_IN_KINDS",
     "PROVE_FROM_CHECKOUT_VARIABLE",
     "Kind",
     "Outcome",

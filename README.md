@@ -285,7 +285,8 @@ What a workspace run sees of the operator's HOME, rail by rail:
 **Residuals, measured and accepted, not fixed:**
 - A web framework test client that opens sockets or waits on an event loop (for example,
   Starlette/FastAPI `TestClient`) can hang inside the codex write sandbox. Run those tests
-  on the host after the run.
+  on the host after the run. `ha prove codex --loopback` records whether a write run on the
+  installed version can open a loopback socket; `ha providers` shows it.
 - **codex reads outside the workspace by design.** Its sandbox stops writes and network,
   not reads: a codex agent can read anything the operator can, in both modes.
 - **opencode's `read` follows an inside symlink to an outside target.** The tool confines
@@ -450,7 +451,7 @@ ha run TARGET [PROMPT | -] [-m|--model MODEL] [--effort E] [--timeout SECONDS] [
 ha roles [--json]
 ha workflows [--json]
 ha providers [RAIL...] [--update [--check] [--no-prove] [--wait SECONDS]] [--json]
-ha prove [RAIL...] [--isolation] [--confinement] [--stale] [--keep] [--json]
+ha prove [RAIL...] [--isolation] [--confinement] [--loopback] [--stale] [--keep] [--json]
 ha models [--provider NAME] [--json] [--refresh]
 ha runs [--limit N] [--json]
 ha show RUN_ID [--json]
@@ -570,7 +571,7 @@ Whenever re-proving would help, `ha providers` names the exact command that does
 
 ### `ha prove`
 
-`ha prove [RAIL...] [--isolation] [--confinement] [--stale] [--keep] [--json]` records CLI
+`ha prove [RAIL...] [--isolation] [--confinement] [--loopback] [--stale] [--keep] [--json]` records CLI
 rails' isolation and confinement proofs from the INSTALLED package -- the same live harness
 `tests/live/headless_agents/test_proofs_live.py` now wraps, so proving needs no repository
 checkout. Everything that can refuse does so before the first provider run: a name that is

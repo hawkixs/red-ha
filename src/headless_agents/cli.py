@@ -13,7 +13,7 @@
     ha show --dir PATH [--json]               display only
     ha clean RUN_ID [--force [--keep-branch]]
     ha init [--print]
-    ha prove [RAIL...] [--isolation] [--confinement] [--stale] [--keep] [--json]
+    ha prove [RAIL...] [--isolation] [--confinement] [--loopback] [--stale] [--keep] [--json]
     ha --version
 
 A thin adapter: it parses arguments and prints. Every rule lives in
@@ -61,7 +61,7 @@ from .model_catalog import load_catalogue
 from .model_live import QUERIED_PROVIDERS, live_models
 from .model_report import build_model_report
 from .proof_state import UNPROVABLE_CONFINEMENT, proof_status, rail_state
-from .proofs import CLI_RAILS
+from .proofs import CLI_RAILS, read_proof
 from .registry import (
     PROVIDER_NAMES,
     Probe,
@@ -326,6 +326,11 @@ def _parser() -> argparse.ArgumentParser:
         "--confinement", action="store_true", help="prove confinement (default: both kinds)"
     )
     prove_parser.add_argument(
+        "--loopback",
+        action="store_true",
+        help="prove that a write run can open a 127.0.0.1 socket (only when asked)",
+    )
+    prove_parser.add_argument(
         "--stale",
         action="store_true",
         help="only the proofs that have not passed on the version installed now",
@@ -409,6 +414,13 @@ def _providers(args: argparse.Namespace, io: Io) -> int:
             row["confinement"] = asdict(rs.confinement)
             row["mode"] = rs.mode
             row["reprove"] = rs.reprove
+            record = read_proof(state, name)
+            if (
+                record is not None
+                and record.loopback is not None
+                and record.version == found.version
+            ):
+                row["loopback"] = {"passed": record.loopback.passed, "date": record.loopback.date}
         else:
             row["isolation"] = None
             row["confinement"] = None
@@ -423,6 +435,10 @@ def _providers(args: argparse.Namespace, io: Io) -> int:
         io.stdout.write(f"{mark}{row['name']:<14} {row['detail']}\n")
         if row["isolation"] is not None:
             io.stdout.write(_proof_detail_line(row))
+            loopback = row.get("loopback")
+            if isinstance(loopback, dict):
+                verdict = "passed" if loopback["passed"] else "failed"
+                io.stdout.write(f"     loopback: {verdict} ({loopback['date']})\n")
             if row["reprove"] is not None:
                 io.stdout.write(f"     re-prove: {row['reprove']}\n")
     io.stdout.write(
@@ -468,6 +484,9 @@ def _needs_proving(state: Path, rail: str, kind: prove.Kind, found: Probe) -> bo
     """
     if not found.available or (kind == "confinement" and rail in UNPROVABLE_CONFINEMENT):
         return False
+    if kind == "loopback":
+        record = read_proof(state, rail)
+        return record is None or record.loopback is None or record.version != found.version
     return proof_status(state, rail, kind, found.version).status != "passed"
 
 
@@ -489,7 +508,8 @@ def _prove(args: argparse.Namespace, io: Io) -> int:
     alone records; this command selects, announces and reports.
     """
     rails = _cli_rails(args.rails, "ha prove")
-    kinds = [kind for kind in prove.KINDS if getattr(args, kind)] or list(prove.KINDS)
+    asked = [kind for kind in (*prove.KINDS, *prove.OPT_IN_KINDS) if getattr(args, kind)]
+    kinds = asked or list(prove.KINDS)
     if args.confinement:
         for rail in args.rails:
             if rail in UNPROVABLE_CONFINEMENT:

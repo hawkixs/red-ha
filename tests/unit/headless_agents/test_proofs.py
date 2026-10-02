@@ -236,3 +236,27 @@ def test_codex_gets_a_repository_under_each_root_it_treats_as_writable(
         import shutil
 
         shutil.rmtree(targets["tmp_repo_tmp"].parent.parent, ignore_errors=True)
+
+
+def test_a_loopback_proof_is_recorded_beside_the_others(tmp_path: Path) -> None:
+    record_proof(tmp_path, "codex", version="codex 1.0", isolation=True, today="2026-10-02")
+    record_proof(tmp_path, "codex", version="codex 1.0", loopback=False, today="2026-10-02")
+    record = read_proof(tmp_path, "codex")
+    assert record is not None
+    assert record.isolation is not None and record.isolation.passed
+    assert record.loopback is not None and record.loopback.passed is False
+
+
+def test_a_record_never_loop_proven_has_no_loopback_key(tmp_path: Path) -> None:
+    record_proof(tmp_path, "codex", version="codex 1.0", confinement=True, today="2026-10-02")
+    document = json.loads(proof_path(tmp_path, "codex").read_text())
+    assert "loopback" not in document
+    record = read_proof(tmp_path, "codex")
+    assert record is not None and record.loopback is None
+
+
+def test_a_new_version_replaces_the_loopback_proof_too(tmp_path: Path) -> None:
+    record_proof(tmp_path, "codex", version="codex 1.0", loopback=True, today="2026-10-02")
+    record_proof(tmp_path, "codex", version="codex 1.1", isolation=True, today="2026-10-03")
+    record = read_proof(tmp_path, "codex")
+    assert record is not None and record.loopback is None

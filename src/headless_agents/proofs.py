@@ -9,14 +9,16 @@ operator's state directory (plan decision P3)::
     <state>/proofs/<rail>.json
     {"rail": "codex", "version": "codex-cli 0.156.0",
      "isolation":   {"passed": true, "date": "2026-09-25"},
-     "confinement": {"passed": true, "date": "2026-09-25"} | null}
+     "confinement": {"passed": true, "date": "2026-09-25"} | null,
+     "loopback":    {"passed": true, "date": "2026-10-02"} | null}
 
 A record holds for exactly the version it names: a rail upgrade needs a new
 proof. The engine refuses a CLI rail without a passing isolation proof for
 its installed version, and classifies a write role unconfined without a
 passing confinement proof. HTTP providers need none (plan decision P4): they
 run no local executor and load no operator configuration. A record that
-cannot be read counts as none.
+cannot be read counts as none. ``loopback`` is opt-in (``ha prove --loopback``) and gates nothing: it only
+reports whether a write run can open a 127.0.0.1 socket.
 
 ISOLATION PROOF BINDING (ticket ha-051-agy, 2026-09-26). The CLI's own ``--version``
 string is not enough: it names the EXECUTOR, not how THIS package runs it. Two rails at
@@ -118,6 +120,9 @@ class ProofRecord:
     version: str | None
     isolation: Proof | None
     confinement: Proof | None
+    #: Opt-in (``ha prove --loopback``); gates nothing. ``None`` when never proven, and on
+    #: a record written before it existed.
+    loopback: Proof | None = None
 
 
 def proof_path(state: Path, rail: str) -> Path:
@@ -150,6 +155,7 @@ def read_proof(state: Path, rail: str) -> ProofRecord | None:
         version=version if isinstance(version, str) else None,
         isolation=_proof(document.get("isolation")),
         confinement=_proof(document.get("confinement")),
+        loopback=_proof(document.get("loopback")),
     )
 
 
@@ -160,6 +166,7 @@ def record_proof(
     version: str | None,
     isolation: bool | None = None,
     confinement: bool | None = None,
+    loopback: bool | None = None,
     today: str | None = None,
 ) -> ProofRecord:
     """Record what a proof measured; in the package, only :func:`headless_agents.prove.prove`
@@ -176,6 +183,9 @@ def record_proof(
         confinement=Proof(passed=confinement, date=date)
         if confinement is not None
         else (keep.confinement if keep else None),
+        loopback=Proof(passed=loopback, date=date)
+        if loopback is not None
+        else (keep.loopback if keep else None),
     )
 
     def as_dict(proof: Proof | None) -> dict[str, object] | None:
@@ -186,15 +196,16 @@ def record_proof(
             data["fingerprint"] = proof.fingerprint
         return data
 
-    publish(
-        proof_path(state, rail),
-        {
-            "rail": rail,
-            "version": version,
-            "isolation": as_dict(record.isolation),
-            "confinement": as_dict(record.confinement),
-        },
-    )
+    document: dict[str, object] = {
+        "rail": rail,
+        "version": version,
+        "isolation": as_dict(record.isolation),
+        "confinement": as_dict(record.confinement),
+    }
+    if record.loopback is not None:
+        # Opt-in: the document of a rail never loop-proven stays what it was.
+        document["loopback"] = as_dict(record.loopback)
+    publish(proof_path(state, rail), document)
     return record
 
 
