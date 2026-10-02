@@ -575,7 +575,9 @@ def test_a_review_waits_for_a_write_holding_its_lineage_then_is_refused(
 ) -> None:
     built = world.implement()
     world.commit_by_hand()
-    monkeypatch.setattr(locks, "LOCK_WAIT_SECONDS", 0.2)
+    # Roomy enough that the global admission, under the same bound, cannot
+    # spend it all on a slow CI host before the lineage lock (ticket 1f8616e6).
+    monkeypatch.setattr(locks, "LOCK_WAIT_SECONDS", 1.0)
     holder = subprocess.Popen(  # noqa: S603 - a fixed argv holding the lock
         [
             "python3",
@@ -631,8 +633,10 @@ def test_review_lineage_wait_expires_before_reviewers(world: World, tmp_path: Pa
         while not ready.exists():
             assert time.monotonic() < limit
             time.sleep(0.01)
-        with pytest.raises(UsageError, match=r"--wait 0\.15 s.*lineage lock"):
-            world.review(wait_seconds=0.15)
+        # Not 0.15 s: the global admission and the registry lock spend the same
+        # deadline first, and a slow CI host ran it out there (ticket 1f8616e6).
+        with pytest.raises(UsageError, match=r"--wait 1 s.*lineage lock"):
+            world.review(wait_seconds=1.0)
         assert len(world.agents["claude"].specs) == before
         # An explicit --wait timeout leaves nothing behind (codex review of
         # PR #239, round 4): the review's own entry is forgotten outright,

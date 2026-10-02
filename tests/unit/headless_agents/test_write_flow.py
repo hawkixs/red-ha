@@ -960,11 +960,15 @@ def test_write_registry_wait_expires_before_intent(world: World, tmp_path: Path)
             assert time.monotonic() < limit
             time.sleep(0.01)
         planned = world.write_plan()
+        # One deadline covers the global admission too (its queue counter is
+        # fsynced): on a slow CI host 0.15 s ran out there, before the registry
+        # lock this test holds (ticket 1f8616e6). The holder never lets go, so a
+        # roomy budget costs its length, not a race.
         planned = replace(
             planned,
-            request=replace(planned.request, wait_seconds=0.15),
+            request=replace(planned.request, wait_seconds=1.0),
         )
-        with pytest.raises(UsageError, match=r"--wait 0\.15 s.*lineage registry lock"):
+        with pytest.raises(UsageError, match=r"--wait 1 s.*lineage registry lock"):
             execute(planned, say=world.said.append)
         assert world.agent.specs == []
         assert world.registry().run_ids() == []

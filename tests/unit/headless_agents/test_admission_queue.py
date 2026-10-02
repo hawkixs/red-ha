@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 
 from headless_agents import locks
-from headless_agents.locks import AdmissionWait, LockTimeout, admit_global
+from headless_agents.locks import AdmissionWait, admit_global
 
 #: One admission in a child process. ``mode`` is ``holder-shared``,
 #: ``holder-exclusive``, ``admit-shared`` or ``admit-exclusive``: a holder keeps the
@@ -135,19 +135,21 @@ def _release(events: Path, label: str) -> None:
     events.with_name(f"release-{label}").write_text("go")
 
 
-def _until_a_writer_waits(state: Path) -> None:
-    """Until an exclusive admission is established as waiting: a shared admission
-    tried now, with a 50 ms budget, no longer gets in. Only the public contract of
-    :func:`admit_global` is used, so this holds for the gate and the queue alike."""
-    limit = time.monotonic() + 10
-    while time.monotonic() < limit:
-        try:
-            with admit_global(state, exclusive=False, wait=AdmissionWait(0.05)):
-                pass
-        except LockTimeout:
-            return
-        time.sleep(0.01)
-    pytest.fail("the exclusive admission never started waiting")
+def _until_a_writer_waits(state: Path, writer: subprocess.Popen[bytes]) -> None:
+    """Until ``writer`` is established as waiting: its live, exclusive ticket is in
+    the queue, so every admission from now on takes a later one.
+
+    Not a probe admission that times out: a slow host can spend a short probe's
+    budget on its own ticket before the writer has queued at all (ticket 1f8616e6).
+    """
+    _until(
+        lambda: any(
+            waiter.alive and waiter.exclusive and waiter.pid == writer.pid
+            for waiter in locks.waiters(state)
+        ),
+        "the exclusive admission waiting in the queue",
+        children=(writer,),
+    )
 
 
 # ── the invariants: pinned against 0.5.2's gate, unchanged by the queue ────────
@@ -207,7 +209,7 @@ def test_a_waiting_writer_is_not_overtaken_by_later_readers(tmp_path: Path) -> N
         holder = spawn("holder-shared", "H")
         _until_logged(events, ("H", "admitted"))
         writer = spawn("admit-exclusive", "E", hold=0.2)
-        _until_a_writer_waits(state)
+        _until_a_writer_waits(state, writer)
         readers = []
         for index in range(1, 4):
             readers.append(spawn("admit-shared", f"R{index}"))
@@ -572,7 +574,7 @@ def test_a_waiter_dying_ahead_stops_blocking_at_the_next_poll(tmp_path: Path) ->
         spawn("holder-shared", "H")
         _until_logged(events, ("H", "admitted"))
         writer = spawn("admit-exclusive", "E1")
-        _until_a_writer_waits(state)
+        _until_a_writer_waits(state, writer)
         spawn("admit-shared", "R")
         _until_logged(events, ("R", "queued"))
         time.sleep(0.3)
@@ -594,13 +596,14 @@ def test_an_expired_wait_leaves_the_queue_and_names_the_phase(tmp_path: Path) ->
         assert blocked_by_holders.value.phase == "global"
         assert blocked_by_holders.value.ahead == ()
         assert locks.waiters(state) == [], "the expired waiter left the queue"
-        started = time.monotonic()
-        with admit_global(state, exclusive=False, wait=AdmissionWait(0.3)):
+        # A later reader gets in: the expired waiter left no live ticket ahead of it,
+        # and only a live one could hold it back. No wall-clock bound here -- a
+        # slow host spends that on the reader's own ticket (ticket 1f8616e6).
+        with admit_global(state, exclusive=False, wait=AdmissionWait(5)):
             pass
-        assert time.monotonic() - started < 0.2, "a later reader must get in at once"
 
         writer = spawn("admit-exclusive", "W")
-        _until_a_writer_waits(state)
+        _until_a_writer_waits(state, writer)
         with pytest.raises(locks.AdmissionTimeout) as blocked_by_the_queue:
             with admit_global(state, exclusive=False, wait=AdmissionWait(0.3)):
                 pass
