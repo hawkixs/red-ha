@@ -21,6 +21,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tarfile
 from collections.abc import Callable, Mapping, Sequence
@@ -60,6 +61,7 @@ _KEYS: Final = frozenset(
         "lifted_at",
         "files",
         "archive",
+        "tree",
         "bundle",
         "steps",
         "completed",
@@ -100,6 +102,8 @@ class Journal:
     lifted_at: str
     files: tuple[Lifted, ...]
     archive: Saved | None
+    #: Digest of the worktree content the archive holds (:func:`_tree_digest`).
+    tree: str | None
     bundle: Saved | None
     steps: Mapping[str, bool]
     completed: bool
@@ -141,6 +145,7 @@ def to_document(journal: Journal) -> dict[str, object]:
         "lifted_at": journal.lifted_at,
         "files": [{"path": f.path, "sha256": f.sha256} for f in journal.files],
         "archive": _saved(journal.archive),
+        "tree": journal.tree,
         "bundle": _saved(journal.bundle),
         "steps": dict(journal.steps),
         "completed": journal.completed,
@@ -236,6 +241,10 @@ def _parse(document: Mapping[str, object], path: Path, owner: str) -> Journal:
         or not all(isinstance(v, bool) for v in steps.values())
     ):
         raise Unknown(f"{path}: steps are malformed")
+    archive = _saved_from(document["archive"], path)
+    tree = _sha(document["tree"], path, optional=True)
+    if (archive is None) != (tree is None):
+        raise Unknown(f"{path}: the archive and the digest of its tree must be recorded together")
     return Journal(
         owner=owner,
         members=tuple(members),
@@ -252,7 +261,8 @@ def _parse(document: Mapping[str, object], path: Path, owner: str) -> Journal:
             Lifted(_relative(f["path"], path), _sha(f["sha256"], path, optional=True))
             for f in files
         ),
-        archive=_saved_from(document["archive"], path),
+        archive=archive,
+        tree=tree,
         bundle=_saved_from(document["bundle"], path),
         steps={name: bool(steps[name]) for name in STEPS},
         completed=_flag(document, "completed", path),
@@ -363,6 +373,21 @@ def _members_of(current: lineages.LineageState, owner: str) -> tuple[str, ...]:
     return members
 
 
+def _require_unlinked(worktree: Path, runs_root: Path, who: str) -> None:
+    """No component below ``runs_root`` down to ``worktree`` is a link: ``rmtree`` follows
+    a linked parent into a tree that was never archived. ``runs_root`` itself may be one."""
+    path = runs_root
+    for part in worktree.relative_to(runs_root).parts:
+        path /= part
+        if path.is_symlink():
+            raise RetireRefused(f"{who}: {path} is a symbolic link; nothing deleted")
+    if _real(worktree) != str(Path(_real(runs_root)) / worktree.relative_to(runs_root)):
+        raise RetireRefused(
+            f"{who}: {worktree} resolves to {_real(worktree)}, outside its own run "
+            "directory; nothing deleted"
+        )
+
+
 def _require_owner_worktree(journal: Journal, registry: Registry) -> None:
     """The only worktree a cleanup removes is the owner's own: ``<runs>/<owner>/wt``."""
     expected = registry.runs_root / journal.owner / "wt"
@@ -371,6 +396,7 @@ def _require_owner_worktree(journal: Journal, registry: Registry) -> None:
             f"lineage {journal.owner}: the journal's worktree is {journal.worktree}, "
             f"expected {expected}"
         )
+    _require_unlinked(expected, registry.runs_root, f"lineage {journal.owner}")
 
 
 def inspect(
@@ -467,6 +493,7 @@ def inspect(
         lifted_at=now,
         files=tuple(files),
         archive=None,
+        tree=None,
         bundle=None,
         steps=dict.fromkeys(STEPS, False),
         completed=False,
@@ -495,8 +522,42 @@ def _write_atomically(target: Path, write: Callable[[Path], None]) -> str:
     return sha256_of(target)
 
 
+def _is_git(name: str) -> bool:
+    return name == "wt/.git" or name.startswith("wt/.git/")
+
+
 def _without_git(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
-    return None if member.name == "wt/.git" or member.name.startswith("wt/.git/") else member
+    return None if _is_git(member.name) else member
+
+
+def _tree_digest(root: Path) -> str:
+    """A sha256 over what the archive holds of ``root``: per entry its path, type, mode
+    and size, the sha256 of a regular file, the target of a link. Same exclusions as the
+    archive (``wt/.git``, sockets); no timestamp, no owner, no git."""
+    digest = hashlib.sha256()
+
+    def visit(path: Path, name: str) -> None:
+        if _is_git(name):
+            return
+        info = path.lstat()
+        mode = info.st_mode
+        if stat.S_ISSOCK(mode):
+            return
+        kind, size, content = "o", 0, ""
+        if stat.S_ISDIR(mode):
+            kind = "d"
+        elif stat.S_ISLNK(mode):
+            kind, content = "l", os.readlink(path)
+        elif stat.S_ISREG(mode):
+            kind, size, content = "f", info.st_size, sha256_of(path)
+        fields = (name, kind, str(stat.S_IMODE(mode)), str(size), content)
+        digest.update(b"\0".join(os.fsencode(field) for field in fields) + b"\0")
+        if kind == "d":
+            for child in sorted(os.listdir(path)):
+                visit(path / child, f"{name}/{child}")
+
+    visit(root, "wt")
+    return digest.hexdigest()
 
 
 def _intact(saved: Saved | None, state: Path) -> bool:
@@ -507,28 +568,15 @@ def _intact(saved: Saved | None, state: Path) -> bool:
     return path.is_file() and sha256_of(path) == saved.sha256
 
 
-def _unsaved_revisions(
-    journal: Journal, tip: str, *, state: Path, environ: Mapping[str, str]
-) -> list[str] | None:
+def _unsaved_revisions(journal: Journal, tip: str) -> list[str] | None:
     """What ``git bundle create`` must pack to save the branch's commits, or ``None``
-    when the branch holds no commit that is not saved elsewhere."""
+    when the branch is still at its base."""
     ref = f"refs/heads/{journal.branch}"
     if journal.base is not None:
         return None if tip == journal.base else [f"{journal.base}..{ref}"]
-    # No base was ever resolved: only the commits no other branch or tag holds are the
-    # branch's own; a tip another ref holds is saved already.
-    holders = git(
-        journal.repository,
-        ["for-each-ref", "--contains", tip, "--format=%(refname)", "refs/heads", "refs/tags"],
-        environ,
-        state=state,
-    )
-    if holders.returncode != 0:
-        raise RetireRefused(f"save_residue: git for-each-ref failed: {holders.stderr.strip()}")
-    if any(name != ref for name in holders.stdout.split()):
-        return None
-    # ``--exclude`` patterns for ``--branches`` are relative to ``refs/heads/``.
-    return [ref, "--not", f"--exclude={journal.branch}", "--branches", "--tags"]
+    # No base was ever resolved: the whole branch is saved, whatever other refs hold now
+    # or later, so the recorded tip survives the deletion.
+    return [ref]
 
 
 def _save_bundle(
@@ -567,31 +615,37 @@ def save_residue(journal: Journal, *, state: Path, environ: Mapping[str, str]) -
     A residue the journal already records, intact, is kept: a resume after a
     half-finished removal must not replace the complete archive with a partial one."""
     directory = ensure_dir(residue_dir(state, journal.owner))
-    archive = journal.archive
+    archive, tree = journal.archive, journal.tree
     if archive is not None and not _intact(archive, state):
         if not os.path.lexists(journal.worktree):
             raise RetireRefused(
                 f"save_residue: expected the archive {archive.path} with sha256 "
                 f"{archive.sha256}; it is missing or altered and the worktree is gone"
             )
-        archive = None
+        archive = tree = None
     if archive is None and os.path.lexists(journal.worktree):
         if journal.worktree.is_symlink():
             raise RetireRefused(f"save_residue: {journal.worktree} is a symbolic link")
         target = directory / "worktree.tar.gz"
+        tree = _tree_digest(journal.worktree)
 
         def write_archive(path: Path) -> None:
             with tarfile.open(path, "w:gz", dereference=False) as stream:
                 stream.add(journal.worktree, arcname="wt", filter=_without_git)
+            if _tree_digest(journal.worktree) != tree:
+                raise RetireRefused(
+                    f"save_residue: {journal.worktree} changed while it was archived; "
+                    "nothing deleted"
+                )
 
         archive = Saved(str(target.relative_to(state)), _write_atomically(target, write_archive))
     bundle = journal.bundle if _intact(journal.bundle, state) else None
     tip = journal.tip
     if bundle is None and tip is not None:
-        revisions = _unsaved_revisions(journal, tip, state=state, environ=environ)
+        revisions = _unsaved_revisions(journal, tip)
         if revisions is not None:
             bundle = _save_bundle(journal, tip, revisions, directory, state=state, environ=environ)
-    return _mark(journal, "save_residue", archive=archive, bundle=bundle)
+    return _mark(journal, "save_residue", archive=archive, tree=tree, bundle=bundle)
 
 
 def remove_worktree(journal: Journal, *, state: Path, environ: Mapping[str, str]) -> Journal:
@@ -607,6 +661,7 @@ def remove_worktree(journal: Journal, *, state: Path, environ: Mapping[str, str]
     if present:
         if journal.worktree.is_symlink():
             raise RetireRefused(f"remove_worktree: {journal.worktree} is a symbolic link")
+        _require_unlinked(journal.worktree, journal.worktree.parent.parent, "remove_worktree")
         if not journal.steps["save_residue"]:
             raise RetireRefused(
                 "remove_worktree: expected save_residue done before deleting "
@@ -621,6 +676,10 @@ def remove_worktree(journal: Journal, *, state: Path, environ: Mapping[str, str]
             raise RetireRefused(
                 f"remove_worktree: expected the archive {journal.archive.path} with sha256 "
                 f"{journal.archive.sha256}; it is missing or altered"
+            )
+        if _tree_digest(journal.worktree) != journal.tree:
+            raise RetireRefused(
+                f"remove_worktree: {journal.worktree} changed since its archive; nothing deleted"
             )
         if not registered:
             raise RetireRefused(

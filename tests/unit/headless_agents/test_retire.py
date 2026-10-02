@@ -46,6 +46,7 @@ def _journal(tmp_path: Path, **changes: object) -> retire.Journal:
             retire.Lifted(f"lineages/{OWNER}.lock", None),
         ),
         archive=None,
+        tree=None,
         bundle=None,
         steps=dict.fromkeys(retire.STEPS, False),
         completed=False,
@@ -56,7 +57,7 @@ def _journal(tmp_path: Path, **changes: object) -> retire.Journal:
 def test_a_journal_round_trips(tmp_path: Path) -> None:
     state = tmp_path / "state"
     journal = _journal(
-        tmp_path, archive=retire.Saved(f"cleanups/{OWNER}/worktree.tar.gz", "d" * 64)
+        tmp_path, archive=retire.Saved(f"cleanups/{OWNER}/worktree.tar.gz", "d" * 64), tree="e" * 64
     )
     path = retire.journal_path(state, OWNER)
     path.parent.mkdir(parents=True)
@@ -82,6 +83,8 @@ def test_an_absent_journal_is_none(tmp_path: Path) -> None:
         ("worktree", "runs/wt"),
         ("branch", "main"),
         ("tip", "not-a-sha"),
+        ("tree", "not-a-digest"),
+        ("tree", "e" * 64),
         ("lifted_at", "yesterday"),
         ("files", [{"path": "../outside.json", "sha256": None}]),
         ("files", [{"path": "/etc/passwd", "sha256": None}]),
@@ -93,6 +96,17 @@ def test_a_journal_is_never_trusted_when_malformed(tmp_path: Path, key: str, val
     state = tmp_path / "state"
     document = retire.to_document(_journal(tmp_path))
     document[key] = value
+    path = retire.journal_path(state, OWNER)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(document))
+    with pytest.raises(Unknown):
+        retire.load_journal(state, OWNER)
+
+
+def test_a_journal_without_its_tree_digest_is_malformed(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    document = retire.to_document(_journal(tmp_path))
+    del document["tree"]
     path = retire.journal_path(state, OWNER)
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(document))
@@ -376,13 +390,16 @@ def test_a_journal_without_a_base_still_bundles_the_unique_commits(world: World)
     assert heads.split() == [journal.tip, f"refs/heads/ha/{owner}"]
 
 
-def test_a_journal_without_a_base_needs_no_bundle_when_another_ref_holds_the_tip(
+def test_a_journal_without_a_base_bundles_the_tip_whatever_other_refs_hold(
     world: World,
 ) -> None:
     owner = _compromised_write(world)
     _git(world.repo, "branch", "keeper", f"ha/{owner}")
     journal = replace(_inspect(world, owner), base=None)
-    assert retire.save_residue(journal, state=world.state, environ=_environ(world)).bundle is None
+    saved = retire.save_residue(journal, state=world.state, environ=_environ(world))
+    assert saved.bundle is not None
+    heads = _git(world.repo, "bundle", "list-heads", str(world.state / saved.bundle.path))
+    assert heads.split() == [journal.tip, f"refs/heads/ha/{owner}"]
 
 
 def test_force_saves_the_commits_of_a_lineage_whose_base_was_never_resolved(world: World) -> None:
@@ -437,6 +454,122 @@ def test_remove_worktree_refuses_a_worktree_that_appeared_after_save_residue(
     with pytest.raises(retire.RetireRefused, match="no archive"):
         retire.remove_worktree(saved, state=world.state, environ=_environ(world))
     assert (saved.worktree / "unsaved.txt").exists()
+
+
+def test_save_residue_records_a_digest_of_the_archived_tree(world: World) -> None:
+    saved = _saved_residue(world)
+    assert saved.tree is not None and retire._SHA256.fullmatch(saved.tree)
+    assert saved.tree == retire._tree_digest(saved.worktree)
+
+
+def test_a_tree_that_changes_while_it_is_archived_is_refused(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    real = retire._without_git
+
+    def racing(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        (journal.worktree / "late.txt").write_text("written mid-archive\n")
+        return real(member)
+
+    monkeypatch.setattr(retire, "_without_git", racing)
+    with pytest.raises(retire.RetireRefused, match="changed while it was archived"):
+        retire.save_residue(journal, state=world.state, environ=_environ(world))
+    assert [p.name for p in retire.residue_dir(world.state, owner).glob("*.tar.gz")] == []
+
+
+@pytest.mark.parametrize("change", ["added", "modified", "mode"])
+def test_remove_worktree_refuses_a_worktree_changed_since_its_archive(
+    world: World, change: str
+) -> None:
+    saved = _saved_residue(world)
+    if change == "added":
+        (saved.worktree / "late.txt").write_text("after the archive\n")
+    elif change == "modified":
+        (saved.worktree / "app.py").write_text("changed after the archive\n")
+    else:
+        (saved.worktree / "app.py").chmod(0o755)
+    with pytest.raises(retire.RetireRefused, match="changed since its archive; nothing deleted"):
+        retire.remove_worktree(saved, state=world.state, environ=_environ(world))
+    assert (saved.worktree / "app.py").exists()
+
+
+def test_an_unchanged_tree_is_removed_whatever_git_rewrote(world: World) -> None:
+    saved = _saved_residue(world)
+    (saved.worktree / ".git").write_text("gitdir: /somewhere/else\n")
+    removed = retire.remove_worktree(saved, state=world.state, environ=_environ(world))
+    assert removed.steps["remove_worktree"] is True and not saved.worktree.exists()
+
+
+def test_a_resume_refuses_a_worktree_changed_after_the_archive(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+
+    def crash(at: str) -> None:
+        if at == "save_residue":
+            raise SystemExit("crashed")
+
+    monkeypatch.setattr(retire, "_crash_after", crash)
+    with pytest.raises(SystemExit):
+        _force(world, owner)
+    monkeypatch.setattr(retire, "_crash_after", lambda at: None)
+    wt = lineage.load(world.state, owner).worktree
+    (wt / "late.txt").write_text("after the archive\n")
+    assert _force(world, owner) == 1
+    assert (wt / "late.txt").exists() and (wt / "app.py").exists()
+    assert any("changed since its archive" in line for line in world.said)
+
+
+def _swap_run_dir_for_a_link(world: World, saved: retire.Journal) -> Path:
+    """The owner's run directory replaced by a link to another worktree's parent."""
+    other = world.home / "other"
+    (other / "wt").mkdir(parents=True)
+    (other / "wt" / "keep.txt").write_text("not archived\n")
+    run_dir = saved.worktree.parent
+    run_dir.rename(world.home / "parked")
+    run_dir.symlink_to(other)
+    return other / "wt" / "keep.txt"
+
+
+def test_remove_worktree_refuses_a_symlinked_run_directory(world: World) -> None:
+    saved = _saved_residue(world)
+    keep = _swap_run_dir_for_a_link(world, saved)
+    with pytest.raises(retire.RetireRefused, match="symbolic link; nothing deleted"):
+        retire.remove_worktree(saved, state=world.state, environ=_environ(world))
+    assert keep.read_text() == "not archived\n"
+
+
+def test_a_resume_refuses_a_run_directory_replaced_by_a_link(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+
+    def crash(at: str) -> None:
+        if at == "save_residue":
+            raise SystemExit("crashed")
+
+    monkeypatch.setattr(retire, "_crash_after", crash)
+    with pytest.raises(SystemExit):
+        _force(world, owner)
+    monkeypatch.setattr(retire, "_crash_after", lambda at: None)
+    journal = retire.load_journal(world.state, owner)
+    assert journal is not None
+    keep = _swap_run_dir_for_a_link(world, journal)
+    assert _force(world, owner) == 1
+    assert keep.read_text() == "not archived\n"
+    assert any("symbolic link" in line for line in world.said)
+
+
+def test_a_linked_directory_above_the_runs_root_is_not_a_refusal(world: World) -> None:
+    saved = _saved_residue(world)
+    runs_root = saved.worktree.parent.parent
+    real = world.home / "real-runs"
+    runs_root.rename(real)
+    runs_root.symlink_to(real)
+    removed = retire.remove_worktree(saved, state=world.state, environ=_environ(world))
+    assert removed.steps["remove_worktree"] is True
 
 
 def test_remove_worktree_refuses_a_directory_git_does_not_register(world: World) -> None:
