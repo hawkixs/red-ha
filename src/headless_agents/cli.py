@@ -12,6 +12,7 @@
     ha show RUN_ID [--json]
     ha show --dir PATH [--json]               display only
     ha clean RUN_ID [--force [--keep-branch]]
+    ha init [--print]
     ha prove [RAIL...] [--isolation] [--confinement] [--stale] [--keep] [--json]
     ha --version
 
@@ -36,7 +37,7 @@ from pathlib import Path
 from typing import IO, Final
 
 from . import lineage as lineages
-from . import locks, prove, quarantine, show, updaters
+from . import locks, presets, prove, quarantine, show, updaters
 from .capability import INVALID_USAGE_EXIT_CODE
 from .cli_models import MODEL_OPTIONAL, MODELS_FILE_NAME, default_models_path, load_models
 from .config_paths import config_dir, config_file, state_dir
@@ -301,6 +302,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="with --force: keep the branch ha/<owner>",
     )
+
+    init_parser = commands.add_parser(
+        "init", help="write the role and workflow presets (never overwrites)"
+    )
+    init_parser.add_argument("--print", action="store_true", help="print them instead of writing")
 
     prove_parser = commands.add_parser(
         "prove",
@@ -1097,6 +1103,25 @@ def _clean(args: argparse.Namespace, io: Io) -> int:
     )
 
 
+# ── ha init ─────────────────────────────────────────────────────────────────
+
+
+def _init(args: argparse.Namespace, io: Io) -> int:
+    """``ha init``: write the role and workflow presets; never overwrites (§3.7)."""
+    if args.print:
+        for name, text in presets.PRESET_FILES:
+            io.stdout.write(f"# --- {name} ---\n{text}\n")
+        return 0
+    directory = config_dir(io.environ, home=io.home)
+    try:
+        written = presets.write_presets(directory)
+    except FileExistsError as exc:
+        raise UsageError(f"{exc}; nothing written") from None
+    for path in written:
+        io.say(f"wrote {path}")
+    return 0
+
+
 # ── ha show ─────────────────────────────────────────────────────────────────
 
 
@@ -1168,11 +1193,13 @@ def main(
             return _show(args, io)
         if args.command == "clean":
             return _clean(args, io)
+        if args.command == "init":
+            return _init(args, io)
         if args.command == "prove":
             return _prove(args, io)
         raise UsageError(
             "a command is required: run, roles, workflows, providers, models, runs, show, "
-            "clean or prove"
+            "clean, init or prove"
         )
     except UsageError as exc:
         io.say(str(exc))
