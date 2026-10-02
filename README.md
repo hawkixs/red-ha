@@ -505,7 +505,10 @@ reads free, and the two `git worktree add` calls measurably overlap -- before re
 instructions -- or a workflow declared in `~/.config/ha/workflows.toml`. `-p` and `--chain`
 were removed in 0.5.0: the provider is the target, and a chain is declared in a role.
 
-`ha init` writes `roles.toml` and `workflows.toml` with the presets red-skills' ha-delegate uses (judge, closure, builder, builder-deep, pr-judge-agy, reviewer-agy; build, build-deep, review-agy, review-codex). It names no model and never overwrites an existing file; `ha init --print` shows them instead.
+`ha init` writes `roles.toml` and `workflows.toml` with the presets red-skills' ha-delegate
+uses (judge, closure, builder, builder-deep, pr-judge-agy, reviewer-agy; build, build-deep,
+review-agy, review-codex). It names no model and never overwrites an existing file;
+`ha init --print` shows them instead.
 
 Each link prints its effective configuration when it starts, including the source of every
 value: `step 1 run build: codex/gpt-6-luna (models.toml), effort medium (default), timeout
