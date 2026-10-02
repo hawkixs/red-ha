@@ -91,7 +91,7 @@ class TestAllowedNetworks:
 
     def test_a_host_name_is_never_resolved(self) -> None:
         with pytest.raises(ValidationError, match="IP literal"):
-            _server(url="http://brain.lan:8765/mcp", allowed_networks=("10.8.0.0/24",))
+            _server(url="http://mcp.example:8765/mcp", allowed_networks=("10.8.0.0/24",))
 
     def test_localhost_is_accepted_iff_loopback_is_listed(self) -> None:
         assert _server(url="http://localhost:1/mcp", allowed_networks=("127.0.0.0/8",)).url

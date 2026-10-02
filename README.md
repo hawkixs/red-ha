@@ -33,8 +33,8 @@ in:
 - **which tool guard** -- a `PreToolUse` hook script the caller ships and
   points at.
 
-The package knows nothing about the Brain MCP server, about the nightly
-Dream's phases, or about any project. It must never import `brain_v42`; a
+The package knows nothing about any particular MCP server, about the jobs
+that call it, or about any project. It must never import `brain_v42`; a
 test guards that boundary.
 
 ## Usage
