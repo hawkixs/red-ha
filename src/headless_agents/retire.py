@@ -559,3 +559,74 @@ def remove_worktree(journal: Journal, *, state: Path, environ: Mapping[str, str]
             "git still lists it"
         )
     return _mark(journal, "remove_worktree")
+
+
+def delete_branch(journal: Journal, *, state: Path, environ: Mapping[str, str]) -> Journal:
+    """Step 3: compare-and-delete ``refs/heads/ha/<owner>`` at the recorded tip.
+
+    Nothing is deleted whose commits were not saved first."""
+    if journal.keep_branch or journal.tip is None:
+        return _mark(journal, "delete_branch")
+    found = branch_tip(journal.repository, journal.branch, state=state, environ=environ)
+    if found is None:
+        return _mark(journal, "delete_branch")  # deleted before a crash: done
+    if found != journal.tip:
+        raise RetireRefused(
+            f"delete_branch: {journal.branch} expected at {journal.tip}, found {found}: "
+            "it was replaced since the journal was written; it is kept"
+        )
+    if not journal.steps["save_residue"]:
+        raise RetireRefused(
+            f"delete_branch: expected save_residue done before deleting {journal.branch}; it is not"
+        )
+    if journal.bundle is not None and not _intact(journal.bundle, state):
+        raise RetireRefused(
+            f"delete_branch: expected the bundle {journal.bundle.path} with sha256 "
+            f"{journal.bundle.sha256}; it is missing or altered"
+        )
+    _, others = worktrees(
+        journal.repository, journal.branch, journal.worktree, state=state, environ=environ
+    )
+    if others:
+        raise RetireRefused(
+            f"delete_branch: {journal.branch} is checked out in {', '.join(others)}"
+        )
+    result = git(
+        journal.repository,
+        ["update-ref", "-d", f"refs/heads/{journal.branch}", journal.tip],
+        environ,
+        state=state,
+    )
+    if result.returncode != 0:
+        after = branch_tip(journal.repository, journal.branch, state=state, environ=environ)
+        if after is not None:
+            raise RetireRefused(
+                f"delete_branch: expected {journal.branch} at {journal.tip}, found {after}"
+            )
+    return _mark(journal, "delete_branch")
+
+
+def _identity(path: Path, entry: Lifted) -> bool:
+    """A regular file (never a link) with the recorded sha256; a lock needs only to exist."""
+    if not path.is_file() or path.is_symlink():
+        return False
+    return entry.sha256 is None or sha256_of(path) == entry.sha256
+
+
+def lift_files(journal: Journal, *, state: Path) -> Journal:
+    """Step 4: rename each file to ``<name>.lifted-<lifted_at>``, in the journal's order."""
+    for entry in journal.files:
+        source = state / entry.path
+        target = state / f"{entry.path}.lifted-{journal.lifted_at}"
+        if not os.path.lexists(source) and _identity(target, entry):
+            continue
+        if _identity(source, entry) and not os.path.lexists(target):
+            os.rename(source, target)
+            _fsync_dir(source.parent)
+            continue
+        raise RetireRefused(
+            f"lift_files: expected {source} with sha256 {entry.sha256} and no {target.name}; "
+            f"found source {'present' if os.path.lexists(source) else 'absent'}, "
+            f"target {'present' if os.path.lexists(target) else 'absent'}"
+        )
+    return _mark(journal, "lift_files", completed=True)

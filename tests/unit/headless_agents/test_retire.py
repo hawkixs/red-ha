@@ -385,3 +385,129 @@ def test_the_residue_directory_is_synced_after_the_rename(
     monkeypatch.setattr(retire, "_fsync_dir", synced.append)
     saved = _saved_residue(world)
     assert synced == [retire.residue_dir(world.state, saved.owner)] * 2
+
+
+def _through_worktree(world: World, owner: str, **inspect_kwargs: bool) -> retire.Journal:
+    journal = _inspect(world, owner, **inspect_kwargs)
+    journal = retire.save_residue(journal, state=world.state, environ=_environ(world))
+    return retire.remove_worktree(journal, state=world.state, environ=_environ(world))
+
+
+def test_the_branch_is_deleted_at_its_recorded_tip(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = retire.delete_branch(
+        _through_worktree(world, owner), state=world.state, environ=_environ(world)
+    )
+    assert journal.steps["delete_branch"] is True
+    assert (
+        retire.branch_tip(world.repo, f"ha/{owner}", state=world.state, environ=_environ(world))
+        is None
+    )
+
+
+def test_a_replaced_branch_is_never_deleted(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = _through_worktree(world, owner)
+    _git(world.repo, "branch", "-f", f"ha/{owner}", "main")
+    with pytest.raises(retire.RetireRefused, match="expected .* found"):
+        retire.delete_branch(journal, state=world.state, environ=_environ(world))
+    assert (
+        _git(world.repo, "rev-parse", f"ha/{owner}").strip()
+        == _git(world.repo, "rev-parse", "main").strip()
+    )
+
+
+def test_a_branch_already_deleted_is_done(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = _through_worktree(world, owner)
+    _git(world.repo, "branch", "-D", f"ha/{owner}")
+    done = retire.delete_branch(journal, state=world.state, environ=_environ(world))
+    assert done.steps["delete_branch"] is True
+
+
+def test_keep_branch_keeps_it(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = retire.delete_branch(
+        _through_worktree(world, owner, keep_branch=True),
+        state=world.state,
+        environ=_environ(world),
+    )
+    assert journal.steps["delete_branch"] is True
+    assert retire.branch_tip(world.repo, f"ha/{owner}", state=world.state, environ=_environ(world))
+
+
+def test_the_branch_is_kept_when_its_commits_were_not_saved(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    with pytest.raises(retire.RetireRefused, match="save_residue"):
+        retire.delete_branch(journal, state=world.state, environ=_environ(world))
+    assert journal.tip == _git(world.repo, "rev-parse", f"ha/{owner}").strip()
+
+
+@pytest.mark.parametrize("damage", ["missing", "altered"])
+def test_the_branch_is_kept_when_the_bundle_is_not_what_was_recorded(
+    world: World, damage: str
+) -> None:
+    saved = _saved_residue(world)
+    assert saved.bundle is not None
+    bundle = world.state / saved.bundle.path
+    if damage == "missing":
+        bundle.unlink()
+    else:
+        bundle.write_bytes(b"altered")
+    with pytest.raises(retire.RetireRefused, match="bundle"):
+        retire.delete_branch(saved, state=world.state, environ=_environ(world))
+    assert saved.tip == _git(world.repo, "rev-parse", saved.branch).strip()
+
+
+def test_lifting_renames_every_file_with_one_timestamp(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    lifted = retire.lift_files(journal, state=world.state)
+    assert lifted.completed is True
+    assert lifted.steps["lift_files"] is True
+    for entry in journal.files:
+        assert not (world.state / entry.path).exists()
+        assert (world.state / f"{entry.path}.lifted-{NOW}").exists()
+
+
+def test_an_interrupted_lift_is_finished_by_the_next(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    first = journal.files[0]
+    os.rename(world.state / first.path, world.state / f"{first.path}.lifted-{NOW}")
+    lifted = retire.lift_files(journal, state=world.state)
+    assert lifted.completed is True
+
+
+def test_a_file_changed_since_the_journal_refuses(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    record = world.state / journal.files[0].path
+    record.write_text(record.read_text() + " ")
+    with pytest.raises(retire.RetireRefused, match="lift_files"):
+        retire.lift_files(journal, state=world.state)
+
+
+def test_a_symlinked_state_file_is_never_followed(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    record = world.state / journal.files[0].path
+    kept = world.state / "elsewhere.json"
+    kept.write_bytes(record.read_bytes())
+    record.unlink()
+    record.symlink_to(kept)
+    with pytest.raises(retire.RetireRefused, match="lift_files"):
+        retire.lift_files(journal, state=world.state)
+    assert kept.exists() and record.is_symlink()
+
+
+def test_every_lift_is_synced_to_the_directory(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    synced: list[Path] = []
+    monkeypatch.setattr(retire, "_fsync_dir", synced.append)
+    retire.lift_files(journal, state=world.state)
+    assert len(synced) == len(journal.files)
