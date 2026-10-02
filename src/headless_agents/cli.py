@@ -58,7 +58,7 @@ from .engine import (
 )
 from .locks import AdmissionWait
 from .model_catalog import load_catalogue
-from .model_live import live_models
+from .model_live import QUERIED_PROVIDERS, live_models
 from .model_report import build_model_report
 from .proof_state import UNPROVABLE_CONFINEMENT, proof_status, rail_state
 from .proofs import CLI_RAILS
@@ -687,10 +687,7 @@ def _providers_update(args: argparse.Namespace, io: Io) -> int:
 def _models(args: argparse.Namespace, io: Io) -> int:
     path = config_file("catalog.toml", io.environ, home=io.home)
     if path is None:
-        catalog_path = config_dir(io.environ, home=io.home) / "catalog.toml"
-        raise UsageError(
-            f"{catalog_path}: missing; the ha-delegate skill (red-skills) installs a template"
-        )
+        return _models_without_catalogue(args, io)
     catalogue = load_catalogue(path)
     roles, _ = declared_roles(io.environ, io.home)
     defaults_path = config_file("models.toml", io.environ, home=io.home)
@@ -726,6 +723,37 @@ def _models(args: argparse.Namespace, io: Io) -> int:
             for item in row_drift:
                 io.stdout.write(f"  drift {item['kind']}: {item['model']} ({item['detail']})\n")
     return 0
+
+
+def _models_without_catalogue(args: argparse.Namespace, io: Io) -> int:
+    """No catalogue: the providers' live lists, and which file adds the rest."""
+    catalog_path = config_dir(io.environ, home=io.home) / "catalog.toml"
+    wanted = (args.provider,) if args.provider else PROVIDER_NAMES
+    names = [name for name in wanted if name in QUERIED_PROVIDERS]
+    live = {name: live_models(name, environ=io.environ, home=io.home) for name in names}
+    if args.json:
+        providers = [
+            {
+                "provider": name,
+                "live_status": listed.status,
+                "live_detail": listed.detail,
+                "models": list(listed.models),
+            }
+            for name, listed in live.items()
+        ]
+        io.stdout.write(
+            json.dumps({"schema": 1, "catalogue": None, "providers": providers}, indent=2) + "\n"
+        )
+    else:
+        for name, listed in live.items():
+            io.stdout.write(f"{name}: {listed.status} ({listed.detail})\n")
+            for model in listed.models:
+                io.stdout.write(f"  {model}\n")
+    io.say(
+        f"{catalog_path}: missing; only the live lists are shown. The catalogue adds the "
+        "other providers and each model's purpose (the ha-delegate skill installs a template)"
+    )
+    return 0 if any(listed.status == "available" for listed in live.values()) else 2
 
 
 # ── ha run ──────────────────────────────────────────────────────────────────
