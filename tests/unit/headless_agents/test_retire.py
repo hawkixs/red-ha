@@ -541,6 +541,25 @@ def test_remove_worktree_refuses_a_symlinked_run_directory(world: World) -> None
     assert keep.read_text() == "not archived\n"
 
 
+def test_remove_worktree_rechecks_the_links_right_before_deleting(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = _saved_residue(world)
+    digest = retire._tree_digest
+    swapped: list[Path] = []
+
+    def digest_then_swap(root: Path) -> str:
+        value = digest(root)
+        if not swapped:
+            swapped.append(_swap_run_dir_for_a_link(world, saved))
+        return value
+
+    monkeypatch.setattr(retire, "_tree_digest", digest_then_swap)
+    with pytest.raises(retire.RetireRefused, match="symbolic link; nothing deleted"):
+        retire.remove_worktree(saved, state=world.state, environ=_environ(world))
+    assert swapped[0].read_text() == "not archived\n"
+
+
 def test_a_resume_refuses_a_run_directory_replaced_by_a_link(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:

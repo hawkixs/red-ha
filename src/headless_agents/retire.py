@@ -532,8 +532,8 @@ def _without_git(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
 
 def _tree_digest(root: Path) -> str:
     """A sha256 over what the archive holds of ``root``: per entry its path, type, mode
-    and size, the sha256 of a regular file, the target of a link. Same exclusions as the
-    archive (``wt/.git``, sockets); no timestamp, no owner, no git."""
+    and size, the sha256 of a regular file, the target of a link, a device's number.
+    Same exclusions as the archive (``wt/.git``, sockets); no timestamp, no owner, no git."""
     digest = hashlib.sha256()
 
     def visit(path: Path, name: str) -> None:
@@ -546,6 +546,10 @@ def _tree_digest(root: Path) -> str:
         kind, size, content = "o", 0, ""
         if stat.S_ISDIR(mode):
             kind = "d"
+        elif stat.S_ISFIFO(mode):
+            kind = "p"
+        elif stat.S_ISCHR(mode) or stat.S_ISBLK(mode):
+            kind, content = ("c" if stat.S_ISCHR(mode) else "b"), str(info.st_rdev)
         elif stat.S_ISLNK(mode):
             kind, content = "l", os.readlink(path)
         elif stat.S_ISREG(mode):
@@ -686,6 +690,8 @@ def remove_worktree(journal: Journal, *, state: Path, environ: Mapping[str, str]
                 f"remove_worktree: {journal.worktree} is not a registered worktree of "
                 f"{journal.repository}; nothing deleted"
             )
+        # Hashing a large tree takes time: the links are checked again last.
+        _require_unlinked(journal.worktree, journal.worktree.parent.parent, "remove_worktree")
         shutil.rmtree(journal.worktree)
     result = git(journal.repository, ["worktree", "prune", "--expire=now"], environ, state=state)
     if result.returncode != 0:
