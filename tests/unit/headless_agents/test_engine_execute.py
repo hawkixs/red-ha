@@ -198,6 +198,17 @@ def test_each_chain_link_prints_its_own_line(world: World) -> None:
     assert world.said[fallback + 1].startswith("step 1 run r: claude/claude-default (models.toml),")
 
 
+def test_an_unknown_model_is_refused_before_any_provider_starts(world: World) -> None:
+    (world.home / ".config" / "ha" / "catalog.toml").write_text(
+        'schema = 1\n\n[codex."gpt-6-sol"]\npurpose = "judgment"\n'
+        'tasks = [{kind = "code-review"}]\ncost = {kind = "subscription"}\n'
+        'verified_at = 2026-10-01\nsource = "operator"\n'
+    )
+    with pytest.raises(UsageError, match=r"gpt-6-sl.*gpt-6-sol.*nothing ran"):
+        world.run("codex", overrides=Overrides(model="gpt-6-sl"))
+    assert "codex" not in world.fakes or world.fakes["codex"].specs == []
+
+
 def test_run_json_steps_carry_effort_timeout_and_model_source(world: World) -> None:
     outcome = world.run("codex")
     step = json.loads((outcome.run_dir / "run.json").read_text())["steps"][0]

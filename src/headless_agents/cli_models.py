@@ -189,12 +189,12 @@ def check_known_model(provider: str, model: str, *, environ: Mapping[str, str], 
     """Refuse a model id neither the catalogue nor the provider's live list knows (spec
     0.5.4 §3.8 a). No catalogue, a broken one, or a provider it does not cover: nothing
     is checked -- the catalogue is the operator's, and its absence is no error here."""
-    path = config_file("catalog.toml", environ, home=home)
-    if path is None or not model:
-        return
     try:
+        path = config_file("catalog.toml", environ, home=home)
+        if path is None or not model:
+            return
         catalogue = load_catalogue(path)
-    except CatalogueError:
+    except (ConfigPathError, CatalogueError):
         return
     known = [entry.model for entry in catalogue.entries if entry.provider == provider]
     if not known or model in known:

@@ -151,3 +151,28 @@ def test_no_catalogue_checks_nothing(tmp_path: Path) -> None:
 def test_a_provider_the_catalogue_does_not_cover_is_not_checked(tmp_path: Path) -> None:
     home = _catalogue_home(tmp_path)
     check_known_model("claude", "anything", environ={"HOME": str(home)}, home=home)
+
+
+def test_an_unavailable_live_list_refuses_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = _catalogue_home(tmp_path)
+    (home / ".config" / "ha" / "catalog.toml").write_text(
+        CATALOGUE.replace('codex."gpt-6-sol"', 'agy."gemini-x"')
+    )
+    monkeypatch.setattr(
+        model_live,
+        "live_models",
+        lambda provider, **_: model_live.LiveList("unavailable", (), "x"),
+    )
+    with pytest.raises(ModelsError, match=r"live list \(unavailable\)"):
+        check_known_model("agy", "gemini-y", environ={"HOME": str(home)}, home=home)
+
+
+def test_a_catalogue_linked_outside_the_config_dir_checks_nothing(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".config" / "ha").mkdir(parents=True)
+    outside = tmp_path / "elsewhere.toml"
+    outside.write_text(CATALOGUE)
+    (home / ".config" / "ha" / "catalog.toml").symlink_to(outside)
+    check_known_model("codex", "gpt-6-sl", environ={"HOME": str(home)}, home=home)
