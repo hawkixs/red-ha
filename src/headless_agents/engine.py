@@ -33,7 +33,7 @@ from . import lineage as lineages
 from . import locks, procgroup, proof_state, retire, review_flow, reviews, structured, write_flow
 from .capability import scoped_environment
 from .chain import run_chain
-from .cli_models import ModelsError, model_sources_for, models_for
+from .cli_models import ModelsError, check_known_model, model_sources_for, models_for
 from .config_paths import ConfigPathError, config_file, state_dir
 from .context import ContextBundle, ContextLevel, resolve_context, role_instructions
 from .locks import LockTimeout, Rank, held
@@ -407,13 +407,16 @@ def _environment(environ: Mapping[str, str], mcp: McpServer | None) -> dict[str,
 def _models(role: Role, request: Request) -> Mapping[str, tuple[str, str]]:
     links = tuple((link.provider, link.model) for link in role.links)
     try:
-        return model_sources_for(
+        sources = model_sources_for(
             links,
             default=request.overrides.model or "",
             role_model=role.model,
             environ=request.environ,
             home=request.home,
         )
+        for provider, (model, _) in sources.items():
+            check_known_model(provider, model, environ=request.environ, home=request.home)
+        return sources
     except ModelsError as exc:
         raise UsageError(str(exc)) from None
 
