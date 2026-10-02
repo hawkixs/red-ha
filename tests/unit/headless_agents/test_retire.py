@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tarfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -228,3 +230,92 @@ def test_a_branch_checked_out_in_another_worktree_refuses(world: World) -> None:
     _git(world.repo, "worktree", "add", "-q", str(world.home / "other"), f"ha/{owner}")
     with pytest.raises(retire.RetireRefused, match="checked out"):
         _inspect(world, owner)
+
+
+def test_the_residue_archive_holds_untracked_files_and_no_git_ran_in_the_worktree(
+    world: World,
+) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    (journal.worktree / "untracked.txt").write_text("keep me\n")
+    world.git_calls.clear()
+    saved = retire.save_residue(journal, state=world.state, environ=_environ(world))
+    assert saved.steps["save_residue"] is True
+    assert saved.archive is not None
+    with tarfile.open(world.state / saved.archive.path) as archive:
+        names = archive.getnames()
+    assert "wt/untracked.txt" in names and "wt/app.py" in names
+    assert not any(name == "wt/.git" or name.startswith("wt/.git/") for name in names)
+    assert all(str(journal.worktree) not in " ".join(call) for call in world.git_calls)
+
+
+def test_the_bundle_holds_the_branch_commits(world: World) -> None:
+    owner = _compromised_write(world)
+    saved = retire.save_residue(_inspect(world, owner), state=world.state, environ=_environ(world))
+    assert saved.bundle is not None
+    _git(world.repo, "bundle", "verify", str(world.state / saved.bundle.path))
+
+
+def test_the_archive_stores_links_and_rmtree_keeps_their_targets(world: World) -> None:
+    owner = _compromised_write(world)
+    secret = world.home / "secret.txt"
+    secret.write_text("never archived\n")
+    journal = _inspect(world, owner)
+    (journal.worktree / "link").symlink_to(secret)
+    saved = retire.save_residue(journal, state=world.state, environ=_environ(world))
+    assert saved.archive is not None
+    with tarfile.open(world.state / saved.archive.path) as archive:
+        member = archive.getmember("wt/link")
+    assert member.issym() and member.linkname == str(secret)
+    removed = retire.remove_worktree(saved, state=world.state, environ=_environ(world))
+    assert removed.steps["remove_worktree"] is True
+    assert secret.read_text() == "never archived\n"
+
+
+def test_a_worktree_whose_git_file_was_rewritten_is_saved_and_removed(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    (journal.worktree / ".git").write_text("gitdir: /somewhere/else\n")
+    saved = retire.save_residue(journal, state=world.state, environ=_environ(world))
+    removed = retire.remove_worktree(saved, state=world.state, environ=_environ(world))
+    assert not journal.worktree.exists()
+    assert str(journal.worktree) not in _git(world.repo, "worktree", "list")
+    assert removed.steps["remove_worktree"] is True
+
+
+def test_remove_worktree_is_done_when_already_removed(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = retire.save_residue(
+        _inspect(world, owner), state=world.state, environ=_environ(world)
+    )
+    once = retire.remove_worktree(journal, state=world.state, environ=_environ(world))
+    again = retire.remove_worktree(
+        replace(once, steps={**once.steps, "remove_worktree": False}),
+        state=world.state,
+        environ=_environ(world),
+    )
+    assert again.steps["remove_worktree"] is True
+
+
+def test_a_worktree_missing_on_disk_but_registered_is_pruned(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = retire.save_residue(
+        _inspect(world, owner), state=world.state, environ=_environ(world)
+    )
+    shutil.rmtree(journal.worktree)
+    assert str(journal.worktree) in _git(world.repo, "worktree", "list")
+    removed = retire.remove_worktree(journal, state=world.state, environ=_environ(world))
+    assert removed.steps["remove_worktree"] is True
+    assert str(journal.worktree) not in _git(world.repo, "worktree", "list")
+
+
+def test_no_temporary_file_is_left_when_the_write_fails(tmp_path: Path) -> None:
+    target = tmp_path / "residue.tar.gz"
+
+    def failing(path: Path) -> None:
+        path.write_bytes(b"half")
+        raise OSError("disk full")
+
+    with pytest.raises(OSError, match="disk full"):
+        retire._write_atomically(target, failing)
+    assert list(tmp_path.iterdir()) == []

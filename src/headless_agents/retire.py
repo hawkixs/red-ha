@@ -20,8 +20,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+import shutil
+import tarfile
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Final
 
@@ -29,7 +31,7 @@ from . import lineage as lineages
 from . import quarantine
 from .gitops import git
 from .runs import RUN_ID_PATTERN, Registry, RegistryError
-from .state import Unknown, read, read_optional
+from .state import Unknown, ensure_dir, read, read_optional
 from .write_flow import UNCONFINED_INTENT
 
 JOURNAL_DIR: Final = "cleanups"
@@ -438,3 +440,84 @@ def inspect(
         steps=dict.fromkeys(STEPS, False),
         completed=False,
     )
+
+
+def _mark(journal: Journal, step: str, **changes: object) -> Journal:
+    return replace(journal, steps={**journal.steps, step: True}, **changes)  # type: ignore[arg-type]
+
+
+def _write_atomically(target: Path, write: Callable[[Path], None]) -> str:
+    """``write`` a temporary file beside ``target``, fsync it, rename it; its sha256."""
+    temporary = target.with_name(f".{target.name}.tmp")
+    temporary.unlink(missing_ok=True)
+    try:
+        write(temporary)
+        with temporary.open("rb") as stream:
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return sha256_of(target)
+
+
+def _without_git(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
+    return None if member.name == "wt/.git" or member.name.startswith("wt/.git/") else member
+
+
+def save_residue(journal: Journal, *, state: Path, environ: Mapping[str, str]) -> Journal:
+    """Step 1: the worktree as a tar.gz archive (no git in it), the commits as a bundle."""
+    directory = ensure_dir(residue_dir(state, journal.owner))
+    archive: Saved | None = None
+    if os.path.lexists(journal.worktree):
+        if journal.worktree.is_symlink():
+            raise RetireRefused(f"save_residue: {journal.worktree} is a symbolic link")
+        target = directory / "worktree.tar.gz"
+
+        def write_archive(path: Path) -> None:
+            with tarfile.open(path, "w:gz", dereference=False) as stream:
+                stream.add(journal.worktree, arcname="wt", filter=_without_git)
+
+        archive = Saved(str(target.relative_to(state)), _write_atomically(target, write_archive))
+    bundle: Saved | None = None
+    if journal.tip is not None and journal.base is not None and journal.tip != journal.base:
+        target = directory / "commits.bundle"
+
+        def write_bundle(path: Path) -> None:
+            result = git(
+                journal.repository,
+                ["bundle", "create", str(path), f"{journal.base}..refs/heads/{journal.branch}"],
+                environ,
+                state=state,
+            )
+            if result.returncode != 0:
+                raise RetireRefused(f"save_residue: git bundle failed: {result.stderr.strip()}")
+
+        bundle = Saved(str(target.relative_to(state)), _write_atomically(target, write_bundle))
+    return _mark(journal, "save_residue", archive=archive, bundle=bundle)
+
+
+def remove_worktree(journal: Journal, *, state: Path, environ: Mapping[str, str]) -> Journal:
+    """Step 2: ``rmtree`` the worktree (links are not followed), then prune git's entry."""
+    present = os.path.lexists(journal.worktree)
+    registered, _ = worktrees(
+        journal.repository, journal.branch, journal.worktree, state=state, environ=environ
+    )
+    if not present and not registered:
+        return _mark(journal, "remove_worktree")
+    if present:
+        if journal.worktree.is_symlink():
+            raise RetireRefused(f"remove_worktree: {journal.worktree} is a symbolic link")
+        shutil.rmtree(journal.worktree)
+    result = git(journal.repository, ["worktree", "prune", "--expire=now"], environ, state=state)
+    if result.returncode != 0:
+        raise RetireRefused(f"remove_worktree: git worktree prune failed: {result.stderr.strip()}")
+    registered, _ = worktrees(
+        journal.repository, journal.branch, journal.worktree, state=state, environ=environ
+    )
+    if registered:
+        raise RetireRefused(
+            f"remove_worktree: expected {journal.worktree} unregistered after prune; "
+            "git still lists it"
+        )
+    return _mark(journal, "remove_worktree")
