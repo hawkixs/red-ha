@@ -95,6 +95,7 @@ class World:
     agent: _Agent
     said: list[str] = field(default_factory=list)
     git_calls: list[list[str]] = field(default_factory=list)
+    git_roots: list[Path] = field(default_factory=list)
 
     @property
     def state(self) -> Path:
@@ -165,6 +166,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
 
     def recording_git(root: Path, args: list[str], environ: object, **kwargs: object):  # type: ignore[no-untyped-def]
         world.git_calls.append(list(args))
+        world.git_roots.append(root)
         return real_git(root, args, environ, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(write_flow, "git", recording_git)

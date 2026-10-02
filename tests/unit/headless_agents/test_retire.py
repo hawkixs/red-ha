@@ -239,7 +239,9 @@ def test_the_residue_archive_holds_untracked_files_and_no_git_ran_in_the_worktre
     journal = _inspect(world, owner)
     (journal.worktree / "untracked.txt").write_text("keep me\n")
     world.git_calls.clear()
+    world.git_roots.clear()
     saved = retire.save_residue(journal, state=world.state, environ=_environ(world))
+    assert world.git_roots, "the bundle ran no git: the check below proves nothing"
     assert saved.steps["save_residue"] is True
     assert saved.archive is not None
     with tarfile.open(world.state / saved.archive.path) as archive:
@@ -247,6 +249,7 @@ def test_the_residue_archive_holds_untracked_files_and_no_git_ran_in_the_worktre
     assert "wt/untracked.txt" in names and "wt/app.py" in names
     assert not any(name == "wt/.git" or name.startswith("wt/.git/") for name in names)
     assert all(str(journal.worktree) not in " ".join(call) for call in world.git_calls)
+    assert not any(retire._inside(root, journal.worktree) for root in world.git_roots)
 
 
 def test_the_bundle_holds_the_branch_commits(world: World) -> None:
@@ -319,3 +322,66 @@ def test_no_temporary_file_is_left_when_the_write_fails(tmp_path: Path) -> None:
     with pytest.raises(OSError, match="disk full"):
         retire._write_atomically(target, failing)
     assert list(tmp_path.iterdir()) == []
+
+
+def _saved_residue(world: World) -> retire.Journal:
+    owner = _compromised_write(world)
+    return retire.save_residue(_inspect(world, owner), state=world.state, environ=_environ(world))
+
+
+def test_a_saved_residue_is_kept_when_save_residue_runs_again(world: World) -> None:
+    saved = _saved_residue(world)
+    assert saved.archive is not None and saved.bundle is not None
+    (saved.worktree / "app.py").unlink()
+    again = retire.save_residue(saved, state=world.state, environ=_environ(world))
+    assert again.archive == saved.archive and again.bundle == saved.bundle
+    assert retire.sha256_of(world.state / saved.archive.path) == saved.archive.sha256
+
+
+def test_a_saved_archive_is_kept_when_the_worktree_is_gone(world: World) -> None:
+    saved = _saved_residue(world)
+    shutil.rmtree(saved.worktree)
+    again = retire.save_residue(saved, state=world.state, environ=_environ(world))
+    assert again.archive == saved.archive
+
+
+def test_a_stale_bundle_lock_does_not_block_a_resume(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    directory = retire.residue_dir(world.state, owner)
+    directory.mkdir(parents=True)
+    (directory / ".commits.bundle.tmp.lock").write_text("")
+    assert retire.save_residue(journal, state=world.state, environ=_environ(world)).bundle
+
+
+def test_remove_worktree_refuses_when_the_residue_was_not_saved(world: World) -> None:
+    owner = _compromised_write(world)
+    journal = _inspect(world, owner)
+    with pytest.raises(retire.RetireRefused, match="save_residue"):
+        retire.remove_worktree(journal, state=world.state, environ=_environ(world))
+    assert journal.worktree.exists()
+
+
+@pytest.mark.parametrize("damage", ["missing", "altered"])
+def test_remove_worktree_refuses_when_the_archive_is_not_what_was_recorded(
+    world: World, damage: str
+) -> None:
+    saved = _saved_residue(world)
+    assert saved.archive is not None
+    archive = world.state / saved.archive.path
+    if damage == "missing":
+        archive.unlink()
+    else:
+        archive.write_bytes(b"altered")
+    with pytest.raises(retire.RetireRefused, match="archive"):
+        retire.remove_worktree(saved, state=world.state, environ=_environ(world))
+    assert saved.worktree.exists()
+
+
+def test_the_residue_directory_is_synced_after_the_rename(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[Path] = []
+    monkeypatch.setattr(retire, "_fsync_dir", synced.append)
+    saved = _saved_residue(world)
+    assert synced == [retire.residue_dir(world.state, saved.owner)] * 2
