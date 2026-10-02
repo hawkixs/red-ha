@@ -588,6 +588,9 @@ itself silently (Claude Code moves its own version without any run failing yet):
 `~/.cache/ha/proofs/` for inspection instead of removing it. `--json` prints every verdict and
 the resulting mode; the exit code is `0` only when every requested proof passed and recorded
 (a `skipped` verdict -- an unprovable or unavailable rail -- never blocks it).
+`--loopback` is opt-in: it runs one write run per rail that binds, connects to and exchanges a
+token over `127.0.0.1`, records pass or fail for the installed version, and gates nothing --
+neither a bare `ha prove` nor `--stale` alone runs it.
 
 ### `ha providers --update`
 
