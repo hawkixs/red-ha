@@ -13,16 +13,63 @@ a new provider is additive.
 
 ## Tags
 
-Each version is tagged on the brain-v42 repository as `headless-agents-vX.Y.Z`, on the
-commit that shipped it — deliberately outside the `v*` pattern, which names brain-v42's own
-version and drives its release workflow. Pin it:
+From 0.5.4 on, each version is tagged `vX.Y.Z` on the red-ha repository, on the commit that
+ships it. Pin it:
 
 ```sh
-uv add "headless-agents @ git+https://github.com/hawkixs/brain-v42.git@headless-agents-v0.5.3#subdirectory=packages/headless-agents"
+uv add "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.4"
 ```
 
-The earlier `v0.6.0` tag (2026-09-14) also carries 0.1.0 and stays valid; it is the last
-time the member rode a brain-v42 tag.
+Up to 0.5.3, versions were tagged on the brain-v42 repository as `headless-agents-vX.Y.Z`,
+deliberately outside the `v*` pattern that names brain-v42's own version; those tags stay
+valid. The earlier `v0.6.0` tag (2026-09-14) also carries 0.1.0; it is the last time the
+member rode a brain-v42 tag.
+
+## 0.5.4 — 2026-10-03 (tag `v0.5.4` after merge)
+
+The first release from the red-ha repository. A write left compromised or pending can now be
+retired by one command instead of renaming ha's private state files by hand; the items
+deferred from 0.5.3 ride along. **After installing: `ha prove --stale`.**
+
+### Added
+
+- **`ha clean --force RUN [--keep-branch]`** retires a lineage that plain `ha clean`
+  refuses (compromised, pending, or held by its own quarantine or stale unconfined intent).
+  It inspects everything before any change, publishes a journal at
+  `<state>/cleanups/<owner>.json`, then runs four idempotent steps with recorded
+  expectations: save the worktree residue (archive and git bundle), remove the worktree
+  without running git inside it, compare-and-delete the branch, lift the state files
+  (kept for audit). It deletes nothing it did not save first. An interrupted cleanup is
+  finished by the next `ha clean --force`; a completed one answers "already cleaned". It
+  holds the lineage registry lock exclusive, then the lineage lock, for the whole command.
+  A healthy lineage is refused and pointed at plain `ha clean`.
+- **`ha init [--print]`** writes `roles.toml` and `workflows.toml` presets into the config
+  directory when absent (never overwrites: exit 2 names the existing file). Roles `judge`,
+  `closure`, `builder`, `builder-deep`, `pr-judge-agy`, `reviewer-agy`; workflows `build`,
+  `build-deep`, `review-agy`, `review-codex`. No model name is written: each codex role
+  carries a commented tier hint.
+- **`ha prove RAIL --loopback`**, an opt-in third proof kind: one write run binds, connects
+  to and exchanges a token over `127.0.0.1`. Recorded per rail and installed version, shown
+  by `ha providers`, gating nothing.
+
+### Changed
+
+- An unknown model id is refused with exit 2 before any provider starts, checked against
+  the catalogue and, for opencode, agy and openrouter, their live list. The refusal names
+  up to three close catalogue ids and the file to edit. Without a catalogue, or for a
+  provider it does not cover, nothing is checked.
+- `ha models` without `catalog.toml` prints the live lists of opencode, agy and openrouter
+  with their status and names the file to create (exit 0 when one list is available).
+- Quarantine and lineage refusals name `ha clean --force`; the README keeps the manual
+  procedure as the fallback when the cleanup itself refuses.
+
+### Fixed
+
+- `keys.toml`: a non-path entry's error names the entry and the rule, never its value;
+  `UnicodeDecodeError`, `RecursionError` and TOML decode errors become `KeysError`.
+- Tests: `--wait` deadlines no longer race a slow host (red-ha PR #3).
+- Ticket 925b07b6 (a refused new lineage unlinked without the registry lock) was already
+  fixed in 0.5.3 (commit 55d51f0); no change.
 
 ## 0.5.3 — 2026-09-29 (tag `headless-agents-v0.5.3` after merge)
 

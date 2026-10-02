@@ -10,7 +10,7 @@ This package moved from [hawkixs/brain-v42](https://github.com/hawkixs/brain-v42
 Install the current release:
 
 ```sh
-uv add "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.3"
+uv add "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.4"
 ```
 
 Versions are tagged `vX.Y.Z` on this repository; `CHANGELOG.md` lists the
@@ -438,7 +438,7 @@ repository planted there is discovered from inside it.
 Hand a task to any provider from a terminal or a session. Install it as a tool:
 
 ```sh
-uv tool install "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.3"
+uv tool install "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.4"
 ```
 
 ```text
