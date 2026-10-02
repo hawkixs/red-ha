@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from headless_agents import engine, lineage, locks, provenance, quarantine, write_flow
+from headless_agents import engine, lineage, locks, provenance, quarantine, retire, write_flow
 from headless_agents.engine import Overrides, Request, UsageError, execute, plan
 from headless_agents.git_tripwire import GitTampered
 from headless_agents.proofs import CLI_RAILS, record_proof
@@ -168,6 +168,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         return real_git(root, args, environ, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(write_flow, "git", recording_git)
+    monkeypatch.setattr(retire, "git", recording_git)
     return world
 
 
