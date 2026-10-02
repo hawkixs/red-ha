@@ -184,3 +184,10 @@ def test_active_lists_an_unreadable_quarantine(tmp_path: Path) -> None:
 
 def test_active_without_a_quarantine_is_empty(tmp_path: Path) -> None:
     assert quarantine.active(tmp_path / "state") == []
+
+
+def test_manual_lift_names_ha_clean_force_for_a_real_run() -> None:
+    message = quarantine.manual_lift("20261002T120000-0000000a", "20261002T120000-0000000a")
+    assert "ha clean --force 20261002T120000-0000000a" in message
+    assert "README.md#manually-lift-a-lineage-or-quarantine" in message
+    assert "ha clean --force" not in quarantine.manual_lift("dead", "unknown")

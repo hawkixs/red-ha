@@ -789,6 +789,14 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
 
 ### Manually lift a lineage or quarantine
 
+Since 0.5.4, `ha clean --force RUN_ID` does this for you after you have inspected the
+worktree: it saves the worktree as an archive and the branch's commits as a bundle under
+`~/.local/state/ha/cleanups/<owner>/`, removes the worktree, deletes `ha/<owner>` only
+at the tip it recorded (`--keep-branch` keeps it), and renames the lineage's state files
+to `*.lifted-<UTC timestamp>`. Every step is journaled in
+`~/.local/state/ha/cleanups/<owner>.json`: if it stops, run the same command again. The
+steps below remain the fallback when `ha clean --force` itself refuses.
+
 Use the run id and lineage named in the refusal. Inspect the run's worktree, commits,
 and state files first; keep any work you need. For a continuation, use the lineage
 owner's run id in the worktree, branch, and lineage paths, and inspect every member

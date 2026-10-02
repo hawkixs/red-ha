@@ -23,6 +23,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final, Literal
 
+from .runs import RUN_ID_PATTERN
 from .state import Unknown, create_once, read
 
 Scope = Literal["lineage", "repository", "operator"]
@@ -117,9 +118,14 @@ def publish(
 
 
 def manual_lift(run_id: object, lineage: object) -> str:
-    """Point a refused write to the audited recovery steps without changing state."""
+    """Point a refused write to ``ha clean --force``, the manual steps as the fallback."""
+    command = (
+        f"after inspection, ha clean --force {run_id} retires it; "
+        if isinstance(run_id, str) and RUN_ID_PATTERN.fullmatch(run_id)
+        else ""
+    )
     return (
-        f"run {run_id}, lineage {lineage}; manual lift procedure: "
+        f"run {run_id}, lineage {lineage}; {command}manual lift procedure: "
         "README.md#manually-lift-a-lineage-or-quarantine"
     )
 
