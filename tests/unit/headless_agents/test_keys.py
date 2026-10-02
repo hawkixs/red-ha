@@ -403,7 +403,7 @@ def test_a_missing_declared_file_is_refused_naming_it(tmp_path: Path) -> None:
         ('codex = "~/c.env"\n', "not an HTTP preset"),
         ('openai-compat = "~/c.env"\n', "not an HTTP preset"),
         ("openrouter = 7\n", "must be a path"),
-        ('openrouter = "relative/or.env"\n', "absolute or start with ~/"),
+        ('openrouter = "relative/or.env"\n', "absolute path or start with ~/"),
         ("[openrouter]\n", "must be a path"),
         ("openrouter = \n", "keys.toml"),
     ],
@@ -412,6 +412,29 @@ def test_keys_toml_is_validated(tmp_path: Path, text: str, rule: str) -> None:
     home = _home(tmp_path)
     _declare(home, text)
     with pytest.raises(KeysError, match=rule):
+        preset_key("openrouter", {"HOME": str(home)})
+
+
+def test_a_key_pasted_where_a_path_belongs_is_never_echoed(tmp_path: Path) -> None:
+    home = _home(tmp_path)
+    _declare(home, f'openrouter = "{SECRET}"\n')
+    with pytest.raises(KeysError) as refused:
+        preset_key("openrouter", {"HOME": str(home)})
+    assert SECRET not in str(refused.value)
+    assert "[openrouter]" in str(refused.value)
+
+
+def test_a_keys_toml_that_is_not_utf8_is_a_keys_error(tmp_path: Path) -> None:
+    home = _home(tmp_path)
+    (home / ".config" / "ha" / "keys.toml").write_bytes(b'openrouter = "\xff\xfe"\n')
+    with pytest.raises(KeysError, match=r"unreadable \(UnicodeDecodeError\)"):
+        preset_key("openrouter", {"HOME": str(home)})
+
+
+def test_a_keys_toml_nested_too_deep_is_a_keys_error(tmp_path: Path) -> None:
+    home = _home(tmp_path)
+    (home / ".config" / "ha" / "keys.toml").write_text("x = " + "[" * 5000 + "]" * 5000 + "\n")
+    with pytest.raises(KeysError, match=r"unreadable \(RecursionError\)"):
         preset_key("openrouter", {"HOME": str(home)})
 
 

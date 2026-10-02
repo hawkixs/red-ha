@@ -112,6 +112,8 @@ def _declared(home: Path, environ: Mapping[str, str]) -> dict[str, Path]:
             document = tomllib.load(stream)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise KeysError(f"{path}: {exc}") from None
+    except (UnicodeDecodeError, RecursionError) as exc:
+        raise KeysError(f"{path}: unreadable ({type(exc).__name__})") from None
     finally:
         if fd >= 0:
             os.close(fd)
@@ -128,7 +130,10 @@ def _declared(home: Path, environ: Mapping[str, str]) -> dict[str, Path]:
         elif Path(value).is_absolute():
             declared[name] = Path(value)
         else:
-            raise KeysError(f"{path}: [{name}] must be absolute or start with ~/, not {value!r}")
+            raise KeysError(
+                f"{path}: [{name}] must be an absolute path or start with ~/ "
+                "(the value is not shown: it may be a key pasted in by mistake)"
+            )
     return declared
 
 
