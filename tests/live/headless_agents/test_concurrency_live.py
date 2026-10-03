@@ -108,7 +108,7 @@ READ_PROMPT: Final = (
 def _write_task(lane: str, nonce: str) -> str:
     return (
         f"Create the file lane-{lane}.txt at the repository root containing exactly the "
-        f"line {nonce}. Make no other change and run no other command."
+        f"line {nonce}. Make no other change."
     )
 
 

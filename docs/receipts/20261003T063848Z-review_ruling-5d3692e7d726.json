@@ -1,0 +1,19 @@
+{
+  "digest": "sha256:5d3692e7d72625adb3be7be36674176b0f20d0b2a03dc0ac9861ee7c27a57bf7",
+  "idempotency_key": "review_ruling:hawkixs/red-ha#4:F-4-3:1",
+  "issuer": "operator",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "decision": "Refuted: record_proof keeps a previous record only when previous.version == version (src/headless_agents/proofs.py:174); a new version starts from an empty record. Pinned by test_proofs.py:258 and :92. The judges saw a truncated diff without proofs.py.",
+      "finding": "F-4-3",
+      "pr": 4,
+      "repository": "hawkixs/red-ha",
+      "ruling": "carry_forward"
+    },
+    "kind": "review_ruling"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-03T06:38:48.872739Z",
+  "schema_version": 1
+}
