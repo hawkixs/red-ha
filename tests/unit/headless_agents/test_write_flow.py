@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from headless_agents import engine, lineage, locks, provenance, quarantine, write_flow
+from headless_agents import engine, lineage, locks, provenance, quarantine, retire, write_flow
 from headless_agents.engine import Overrides, Request, UsageError, execute, plan
 from headless_agents.git_tripwire import GitTampered
 from headless_agents.proofs import CLI_RAILS, record_proof
@@ -95,6 +95,7 @@ class World:
     agent: _Agent
     said: list[str] = field(default_factory=list)
     git_calls: list[list[str]] = field(default_factory=list)
+    git_roots: list[Path] = field(default_factory=list)
 
     @property
     def state(self) -> Path:
@@ -165,9 +166,11 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
 
     def recording_git(root: Path, args: list[str], environ: object, **kwargs: object):  # type: ignore[no-untyped-def]
         world.git_calls.append(list(args))
+        world.git_roots.append(root)
         return real_git(root, args, environ, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(write_flow, "git", recording_git)
+    monkeypatch.setattr(retire, "git", recording_git)
     return world
 
 
@@ -1643,11 +1646,13 @@ def test_quarantine_refusal_names_manual_lift_procedure(world: World) -> None:
     assert "README.md#manually-lift-a-lineage-or-quarantine" in refusal
 
 
-def test_clean_cli_rejects_force() -> None:
+def test_clean_cli_accepts_force_and_keep_branch() -> None:
     from headless_agents import cli
 
-    with pytest.raises(SystemExit, match="2"):
-        cli._parser().parse_args(["clean", "--force", "20260927T000000-aaaaaaaa"])
+    args = cli._parser().parse_args(
+        ["clean", "--force", "--keep-branch", "20260927T000000-aaaaaaaa"]
+    )
+    assert args.force is True and args.keep_branch is True
 
 
 def test_compromised_lineage_refusal_names_manual_lift_procedure(world: World) -> None:

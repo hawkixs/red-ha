@@ -464,6 +464,91 @@ def test_the_planned_confinement_runs_are_the_planted_targets(tmp_path: Path, ra
                 subprocess.run(["rm", "-rf", str(path.parent.parent)], check=False)
 
 
+# ── loopback (opt-in) ─────────────────────────────────────────────────────────
+
+
+def _run_the_loopback_script(rail: str, spec: RunSpec, keep: bool) -> RunResult:
+    workspace = spec.profile.workspace
+    assert workspace is not None and workspace.write
+    subprocess.run(
+        [sys.executable, prove_module.LOOPBACK_SCRIPT_NAME],
+        cwd=workspace.path,
+        check=True,
+        timeout=30,
+    )
+    return _result(spec)
+
+
+def test_loopback_passes_and_is_recorded_when_the_script_wrote_its_token(
+    tmp_path: Path, versions: list[str]
+) -> None:
+    verdict = _prove(tmp_path, "codex", "loopback", _run_the_loopback_script)
+    assert verdict.outcome == "passed" and verdict.recorded and verdict.runs == 1
+    record = read_proof(tmp_path / "state", "codex")
+    assert record is not None and record.loopback is not None and record.loopback.passed
+    assert record.isolation is None and record.confinement is None
+
+
+def test_loopback_fails_when_the_sandbox_refused_the_socket(
+    tmp_path: Path, versions: list[str]
+) -> None:
+    def refuse(rail: str, spec: RunSpec, keep: bool) -> RunResult:
+        workspace = spec.profile.workspace
+        assert workspace is not None
+        (workspace.path / prove_module.LOOPBACK_RESULT_NAME).write_text(
+            "loopback-error PermissionError"
+        )
+        return _result(spec)
+
+    verdict = _prove(tmp_path, "codex", "loopback", refuse)
+    assert verdict.outcome == "failed" and verdict.recorded
+    record = read_proof(tmp_path / "state", "codex")
+    assert record is not None and record.loopback is not None and not record.loopback.passed
+
+
+def test_loopback_is_inconclusive_when_the_script_never_ran(
+    tmp_path: Path, versions: list[str]
+) -> None:
+    verdict = _prove(tmp_path, "codex", "loopback", lambda rail, spec, keep: _result(spec))
+    assert verdict.outcome == "inconclusive" and not verdict.recorded
+    assert read_proof(tmp_path / "state", "codex") is None
+
+
+def test_loopback_is_inconclusive_when_the_run_crashes(tmp_path: Path, versions: list[str]) -> None:
+    def crash(rail: str, spec: RunSpec, keep: bool) -> RunResult:
+        raise RuntimeError("boom")
+
+    verdict = _prove(tmp_path, "codex", "loopback", crash)
+    assert verdict.outcome == "inconclusive" and not verdict.recorded
+
+
+def test_loopback_records_nothing_when_the_version_moves(
+    tmp_path: Path, versions: list[str]
+) -> None:
+    versions[:] = ["1.0", "1.1"]
+    verdict = _prove(tmp_path, "codex", "loopback", _run_the_loopback_script)
+    assert verdict.outcome == "inconclusive" and not verdict.recorded
+
+
+def test_loopback_runs_a_single_write_run_with_the_rails_own_credentials(
+    tmp_path: Path, versions: list[str]
+) -> None:
+    seen: list[RunSpec] = []
+
+    def run(rail: str, spec: RunSpec, keep: bool) -> RunResult:
+        seen.append(spec)
+        return _run_the_loopback_script(rail, spec, keep)
+
+    _prove(tmp_path, "agy", "loopback", run)
+    assert len(seen) == prove_module.planned_runs("agy", "loopback") == 1
+    assert seen[0].profile.credentials.paths == prove_module.EXPOSED["agy"]
+
+
+def test_loopback_is_never_in_the_default_kinds() -> None:
+    assert "loopback" not in prove_module.KINDS
+    assert prove_module.OPT_IN_KINDS == ("loopback",)
+
+
 # ── running_from_checkout ─────────────────────────────────────────────────────
 
 

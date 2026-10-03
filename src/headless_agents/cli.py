@@ -11,8 +11,9 @@
     ha runs [--limit N] [--json]
     ha show RUN_ID [--json]
     ha show --dir PATH [--json]               display only
-    ha clean RUN_ID
-    ha prove [RAIL...] [--isolation] [--confinement] [--stale] [--keep] [--json]
+    ha clean RUN_ID [--force [--keep-branch]]
+    ha init [--print]
+    ha prove [RAIL...] [--isolation] [--confinement] [--loopback] [--stale] [--keep] [--json]
     ha --version
 
 A thin adapter: it parses arguments and prints. Every rule lives in
@@ -36,7 +37,7 @@ from pathlib import Path
 from typing import IO, Final
 
 from . import lineage as lineages
-from . import locks, prove, quarantine, show, updaters
+from . import locks, presets, prove, quarantine, show, updaters
 from .capability import INVALID_USAGE_EXIT_CODE
 from .cli_models import MODEL_OPTIONAL, MODELS_FILE_NAME, default_models_path, load_models
 from .config_paths import config_dir, config_file, state_dir
@@ -57,10 +58,10 @@ from .engine import (
 )
 from .locks import AdmissionWait
 from .model_catalog import load_catalogue
-from .model_live import live_models
+from .model_live import QUERIED_PROVIDERS, live_models
 from .model_report import build_model_report
 from .proof_state import UNPROVABLE_CONFINEMENT, proof_status, rail_state
-from .proofs import CLI_RAILS
+from .proofs import CLI_RAILS, read_proof
 from .registry import (
     PROVIDER_NAMES,
     Probe,
@@ -290,6 +291,22 @@ def _parser() -> argparse.ArgumentParser:
 
     clean_parser = commands.add_parser("clean", help="remove one run's directory")
     clean_parser.add_argument("run_id", help="the run id, as ha run printed it")
+    clean_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="retire a compromised, pending or quarantined lineage after inspection "
+        "(journaled, resumable)",
+    )
+    clean_parser.add_argument(
+        "--keep-branch",
+        action="store_true",
+        help="with --force: keep the branch ha/<owner>",
+    )
+
+    init_parser = commands.add_parser(
+        "init", help="write the role and workflow presets (never overwrites)"
+    )
+    init_parser.add_argument("--print", action="store_true", help="print them instead of writing")
 
     prove_parser = commands.add_parser(
         "prove",
@@ -307,6 +324,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     prove_parser.add_argument(
         "--confinement", action="store_true", help="prove confinement (default: both kinds)"
+    )
+    prove_parser.add_argument(
+        "--loopback",
+        action="store_true",
+        help="prove that a write run can open a 127.0.0.1 socket (only when asked)",
     )
     prove_parser.add_argument(
         "--stale",
@@ -392,6 +414,13 @@ def _providers(args: argparse.Namespace, io: Io) -> int:
             row["confinement"] = asdict(rs.confinement)
             row["mode"] = rs.mode
             row["reprove"] = rs.reprove
+            record = read_proof(state, name)
+            if (
+                record is not None
+                and record.loopback is not None
+                and record.version == found.version
+            ):
+                row["loopback"] = {"passed": record.loopback.passed, "date": record.loopback.date}
         else:
             row["isolation"] = None
             row["confinement"] = None
@@ -406,6 +435,10 @@ def _providers(args: argparse.Namespace, io: Io) -> int:
         io.stdout.write(f"{mark}{row['name']:<14} {row['detail']}\n")
         if row["isolation"] is not None:
             io.stdout.write(_proof_detail_line(row))
+            loopback = row.get("loopback")
+            if isinstance(loopback, dict):
+                verdict = "passed" if loopback["passed"] else "failed"
+                io.stdout.write(f"     loopback: {verdict} ({loopback['date']})\n")
             if row["reprove"] is not None:
                 io.stdout.write(f"     re-prove: {row['reprove']}\n")
     io.stdout.write(
@@ -451,6 +484,9 @@ def _needs_proving(state: Path, rail: str, kind: prove.Kind, found: Probe) -> bo
     """
     if not found.available or (kind == "confinement" and rail in UNPROVABLE_CONFINEMENT):
         return False
+    if kind == "loopback":
+        record = read_proof(state, rail)
+        return record is None or record.loopback is None or record.version != found.version
     return proof_status(state, rail, kind, found.version).status != "passed"
 
 
@@ -472,7 +508,8 @@ def _prove(args: argparse.Namespace, io: Io) -> int:
     alone records; this command selects, announces and reports.
     """
     rails = _cli_rails(args.rails, "ha prove")
-    kinds = [kind for kind in prove.KINDS if getattr(args, kind)] or list(prove.KINDS)
+    asked = [kind for kind in (*prove.KINDS, *prove.OPT_IN_KINDS) if getattr(args, kind)]
+    kinds = asked or list(prove.KINDS)
     if args.confinement:
         for rail in args.rails:
             if rail in UNPROVABLE_CONFINEMENT:
@@ -670,10 +707,7 @@ def _providers_update(args: argparse.Namespace, io: Io) -> int:
 def _models(args: argparse.Namespace, io: Io) -> int:
     path = config_file("catalog.toml", io.environ, home=io.home)
     if path is None:
-        catalog_path = config_dir(io.environ, home=io.home) / "catalog.toml"
-        raise UsageError(
-            f"{catalog_path}: missing; the ha-delegate skill (red-skills) installs a template"
-        )
+        return _models_without_catalogue(args, io)
     catalogue = load_catalogue(path)
     roles, _ = declared_roles(io.environ, io.home)
     defaults_path = config_file("models.toml", io.environ, home=io.home)
@@ -709,6 +743,37 @@ def _models(args: argparse.Namespace, io: Io) -> int:
             for item in row_drift:
                 io.stdout.write(f"  drift {item['kind']}: {item['model']} ({item['detail']})\n")
     return 0
+
+
+def _models_without_catalogue(args: argparse.Namespace, io: Io) -> int:
+    """No catalogue: the providers' live lists, and which file adds the rest."""
+    catalog_path = config_dir(io.environ, home=io.home) / "catalog.toml"
+    wanted = (args.provider,) if args.provider else PROVIDER_NAMES
+    names = [name for name in wanted if name in QUERIED_PROVIDERS]
+    live = {name: live_models(name, environ=io.environ, home=io.home) for name in names}
+    if args.json:
+        providers = [
+            {
+                "provider": name,
+                "live_status": listed.status,
+                "live_detail": listed.detail,
+                "models": list(listed.models),
+            }
+            for name, listed in live.items()
+        ]
+        io.stdout.write(
+            json.dumps({"schema": 1, "catalogue": None, "providers": providers}, indent=2) + "\n"
+        )
+    else:
+        for name, listed in live.items():
+            io.stdout.write(f"{name}: {listed.status} ({listed.detail})\n")
+            for model in listed.models:
+                io.stdout.write(f"  {model}\n")
+    io.say(
+        f"{catalog_path}: missing; only the live lists are shown. The catalogue adds the "
+        "other providers and each model's purpose (the ha-delegate skill installs a template)"
+    )
+    return 0 if any(listed.status == "available" for listed in live.values()) else 2
 
 
 # ── ha run ──────────────────────────────────────────────────────────────────
@@ -1076,7 +1141,33 @@ def _runs(args: argparse.Namespace, io: Io) -> int:
 
 
 def _clean(args: argparse.Namespace, io: Io) -> int:
-    return clean(args.run_id, environ=io.environ, home=io.home, say=io.say)
+    return clean(
+        args.run_id,
+        environ=io.environ,
+        home=io.home,
+        say=io.say,
+        force=args.force,
+        keep_branch=args.keep_branch,
+    )
+
+
+# ── ha init ─────────────────────────────────────────────────────────────────
+
+
+def _init(args: argparse.Namespace, io: Io) -> int:
+    """``ha init``: write the role and workflow presets; never overwrites (§3.7)."""
+    if args.print:
+        for name, text in presets.PRESET_FILES:
+            io.stdout.write(f"# --- {name} ---\n{text}\n")
+        return 0
+    directory = config_dir(io.environ, home=io.home)
+    try:
+        written = presets.write_presets(directory)
+    except FileExistsError as exc:
+        raise UsageError(f"{exc}; nothing written") from None
+    for path in written:
+        io.say(f"wrote {path}")
+    return 0
 
 
 # ── ha show ─────────────────────────────────────────────────────────────────
@@ -1150,11 +1241,13 @@ def main(
             return _show(args, io)
         if args.command == "clean":
             return _clean(args, io)
+        if args.command == "init":
+            return _init(args, io)
         if args.command == "prove":
             return _prove(args, io)
         raise UsageError(
             "a command is required: run, roles, workflows, providers, models, runs, show, "
-            "clean or prove"
+            "clean, init or prove"
         )
     except UsageError as exc:
         io.say(str(exc))

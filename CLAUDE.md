@@ -6,7 +6,7 @@
 
 - Public repository: `https://github.com/hawkixs/red-ha`
 - Brain project key: `red-ha`
-- Package: `headless-agents`, Python 3.12+, source in `src/headless_agents`
+- Package: `headless-agents`, Python 3.12.7+, source in `src/headless_agents`
 - ReD rail: `tier: bootstrap`, `ledger: file` in `rail.yaml`
 - Stage 1 contract receipt: `docs/receipts/`; stage 2 design spec belongs in `docs/specs/`
 

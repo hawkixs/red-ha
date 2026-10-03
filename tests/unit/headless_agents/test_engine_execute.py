@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import io
 import json
+import os
 import subprocess
 import sys
 import time
@@ -195,6 +196,17 @@ def test_each_chain_link_prints_its_own_line(world: World) -> None:
     assert world.said[0].startswith("step 1 run r: codex/m1 (chain link),")
     fallback = next(i for i, line in enumerate(world.said) if "falling back to claude" in line)
     assert world.said[fallback + 1].startswith("step 1 run r: claude/claude-default (models.toml),")
+
+
+def test_an_unknown_model_is_refused_before_any_provider_starts(world: World) -> None:
+    (world.home / ".config" / "ha" / "catalog.toml").write_text(
+        'schema = 1\n\n[codex."gpt-6-sol"]\npurpose = "judgment"\n'
+        'tasks = [{kind = "code-review"}]\ncost = {kind = "subscription"}\n'
+        'verified_at = 2026-10-01\nsource = "operator"\n'
+    )
+    with pytest.raises(UsageError, match=r"gpt-6-sl.*gpt-6-sol.*nothing ran"):
+        world.run("codex", overrides=Overrides(model="gpt-6-sl"))
+    assert "codex" not in world.fakes or world.fakes["codex"].specs == []
 
 
 def test_run_json_steps_carry_effort_timeout_and_model_source(world: World) -> None:
@@ -1092,3 +1104,17 @@ def test_without_a_schema_a_text_answer_is_answered(world: World) -> None:
     report = json.loads((outcome.run_dir / "run.json").read_text())
     assert outcome.exit_code == 0 and report["status"] == "answered"
     assert report["failure_reason"] is None
+
+
+def test_force_on_a_run_outside_any_lineage_is_a_usage_error(world: World) -> None:
+    world.run("codex")
+    entry = _only_entry(world)
+    with pytest.raises(UsageError, match="not a write run"):
+        engine.clean(
+            entry.run_id,
+            environ={"PATH": os.environ["PATH"], "HOME": str(world.home)},
+            home=world.home,
+            say=world.said.append,
+            force=True,
+        )
+    assert entry.run_dir.exists()

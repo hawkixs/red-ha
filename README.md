@@ -10,7 +10,7 @@ This package moved from [hawkixs/brain-v42](https://github.com/hawkixs/brain-v42
 Install the current release:
 
 ```sh
-uv add "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.3"
+uv add "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.4"
 ```
 
 Versions are tagged `vX.Y.Z` on this repository; `CHANGELOG.md` lists the
@@ -285,7 +285,8 @@ What a workspace run sees of the operator's HOME, rail by rail:
 **Residuals, measured and accepted, not fixed:**
 - A web framework test client that opens sockets or waits on an event loop (for example,
   Starlette/FastAPI `TestClient`) can hang inside the codex write sandbox. Run those tests
-  on the host after the run.
+  on the host after the run. `ha prove codex --loopback` records whether a write run on the
+  installed version can open a loopback socket; `ha providers` shows it.
 - **codex reads outside the workspace by design.** Its sandbox stops writes and network,
   not reads: a codex agent can read anything the operator can, in both modes.
 - **opencode's `read` follows an inside symlink to an outside target.** The tool confines
@@ -437,7 +438,7 @@ repository planted there is discovered from inside it.
 Hand a task to any provider from a terminal or a session. Install it as a tool:
 
 ```sh
-uv tool install "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.3"
+uv tool install "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.4"
 ```
 
 ```text
@@ -450,12 +451,13 @@ ha run TARGET [PROMPT | -] [-m|--model MODEL] [--effort E] [--timeout SECONDS] [
 ha roles [--json]
 ha workflows [--json]
 ha providers [RAIL...] [--update [--check] [--no-prove] [--wait SECONDS]] [--json]
-ha prove [RAIL...] [--isolation] [--confinement] [--stale] [--keep] [--json]
+ha prove [RAIL...] [--isolation] [--confinement] [--loopback] [--stale] [--keep] [--json]
 ha models [--provider NAME] [--json] [--refresh]
 ha runs [--limit N] [--json]
 ha show RUN_ID [--json]
 ha show --dir PATH [--json]
-ha clean RUN_ID
+ha clean RUN_ID [--force [--keep-branch]]
+ha init [--print]
 ha --version
 ```
 
@@ -502,6 +504,11 @@ reads free, and the two `git worktree add` calls measurably overlap -- before re
 `~/.config/ha/roles.toml` -- an executor: one provider, or a `chain` of them, with optional
 instructions -- or a workflow declared in `~/.config/ha/workflows.toml`. `-p` and `--chain`
 were removed in 0.5.0: the provider is the target, and a chain is declared in a role.
+
+`ha init` writes `roles.toml` and `workflows.toml` with the presets red-skills' ha-delegate
+uses (judge, closure, builder, builder-deep, pr-judge-agy, reviewer-agy; build, build-deep,
+review-agy, review-codex). It names no model and never overwrites an existing file;
+`ha init --print` shows them instead.
 
 Each link prints its effective configuration when it starts, including the source of every
 value: `step 1 run build: codex/gpt-6-luna (models.toml), effort medium (default), timeout
@@ -567,7 +574,7 @@ Whenever re-proving would help, `ha providers` names the exact command that does
 
 ### `ha prove`
 
-`ha prove [RAIL...] [--isolation] [--confinement] [--stale] [--keep] [--json]` records CLI
+`ha prove [RAIL...] [--isolation] [--confinement] [--loopback] [--stale] [--keep] [--json]` records CLI
 rails' isolation and confinement proofs from the INSTALLED package -- the same live harness
 `tests/live/headless_agents/test_proofs_live.py` now wraps, so proving needs no repository
 checkout. Everything that can refuse does so before the first provider run: a name that is
@@ -584,6 +591,9 @@ itself silently (Claude Code moves its own version without any run failing yet):
 `~/.cache/ha/proofs/` for inspection instead of removing it. `--json` prints every verdict and
 the resulting mode; the exit code is `0` only when every requested proof passed and recorded
 (a `skipped` verdict -- an unprovable or unavailable rail -- never blocks it).
+`--loopback` is opt-in: it runs one write run per rail that binds, connects to and exchanges a
+token over `127.0.0.1`, records pass or fail for the installed version, and gates nothing --
+neither a bare `ha prove` nor `--stale` alone runs it.
 
 ### `ha providers --update`
 
@@ -788,6 +798,14 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
 
 
 ### Manually lift a lineage or quarantine
+
+Since 0.5.4, `ha clean --force RUN_ID` does this for you after you have inspected the
+worktree: it saves the worktree as an archive and the branch's commits as a bundle under
+`~/.local/state/ha/cleanups/<owner>/`, removes the worktree, deletes `ha/<owner>` only
+at the tip it recorded (`--keep-branch` keeps it), and renames the lineage's state files
+to `*.lifted-<UTC timestamp>`. Every step is journaled in
+`~/.local/state/ha/cleanups/<owner>.json`: if it stops, run the same command again. The
+steps below remain the fallback when `ha clean --force` itself refuses.
 
 Use the run id and lineage named in the refusal. Inspect the run's worktree, commits,
 and state files first; keep any work you need. For a continuation, use the lineage

@@ -63,13 +63,58 @@ def test_json_reports_catalogue_and_unavailable_live_list(
     assert report["providers"][0]["models"][0]["id"] == "known"
 
 
-def test_missing_catalogue_returns_usage_error(
-    tmp_path: Path,
+def _only_opencode_is_listed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "live_models",
+        lambda provider, **kwargs: (
+            LiveList("available", (f"{provider}-m1",), "ok")
+            if provider == "opencode"
+            else LiveList("unavailable", (), "not installed")
+        ),
+    )
+
+
+def test_without_a_catalogue_ha_models_lists_the_live_providers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _only_opencode_is_listed(monkeypatch)
     code, out, err = _invoke(tmp_path, "models")
+    assert code == 0
+    assert "opencode: available (ok)" in out and "  opencode-m1" in out
+    assert "codex" not in out
+    assert "catalog.toml: missing" in err
+
+
+def test_without_a_catalogue_json_lists_the_queried_providers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _only_opencode_is_listed(monkeypatch)
+    code, out, _ = _invoke(tmp_path, "models", "--json")
+    report = json.loads(out)
+    assert code == 0 and report["catalogue"] is None
+    rows = {row["provider"]: row for row in report["providers"]}
+    assert set(rows) == {"opencode", "agy", "openrouter"}
+    assert rows["opencode"]["models"] == ["opencode-m1"]
+
+
+def test_without_a_catalogue_a_provider_without_a_live_list_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _only_opencode_is_listed(monkeypatch)
+    code, out, err = _invoke(tmp_path, "models", "--provider", "codex")
     assert code == 2 and out == ""
-    assert "catalog.toml" in err
-    assert "ha-delegate skill (red-skills) installs a template" in err
+    assert "catalog.toml: missing" in err
+
+
+def test_without_a_catalogue_and_no_live_list_ha_models_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        cli, "live_models", lambda provider, **kwargs: LiveList("unavailable", (), "x")
+    )
+    code, _, err = _invoke(tmp_path, "models")
+    assert code == 2 and "catalog.toml: missing" in err
 
 
 def test_absolute_xdg_config_home_selects_its_ha_directory(

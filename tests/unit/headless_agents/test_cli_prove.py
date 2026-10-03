@@ -279,3 +279,49 @@ def test_prove_removes_its_root_unless_keep(world: _World) -> None:
     assert code == 0
     kept = world.roots[-1]
     assert kept.is_dir() and str(kept) in out
+
+
+def test_prove_loopback_selects_only_the_loopback_proof(world: _World) -> None:
+    code, _, err = world.run("prove", "codex", "--loopback")
+    assert code == 0, err
+    assert world.calls == [("codex", "loopback")]
+    assert "prove codex loopback: 1 provider runs on codex-cli 1.0" in err
+
+
+def test_prove_without_loopback_never_runs_it(world: _World) -> None:
+    code, _, err = world.run("prove", "codex")
+    assert code == 0, err
+    assert [kind for _, kind in world.calls] == ["isolation", "confinement"]
+
+
+def test_prove_stale_leaves_loopback_alone_unless_asked(world: _World) -> None:
+    code, _, err = world.run("prove", "codex", "--stale")
+    assert code == 0, err
+    assert ("codex", "loopback") not in world.calls
+
+
+def test_prove_stale_loopback_reproves_a_missing_or_old_proof_only(world: _World) -> None:
+    code, _, err = world.run("prove", "codex", "--loopback", "--stale")
+    assert code == 0, err
+    assert world.calls == [("codex", "loopback")]
+    world.calls.clear()
+    record_proof(world.state, "codex", version="codex-cli 1.0", loopback=True)
+    code, _, err = world.run("prove", "codex", "--loopback", "--stale")
+    assert code == 0, err
+    assert world.calls == []
+    record_proof(world.state, "codex", version="codex-cli 0.9", loopback=True)
+    code, _, err = world.run("prove", "codex", "--loopback", "--stale")
+    assert code == 0, err
+    assert world.calls == [("codex", "loopback")]
+
+
+def test_providers_shows_the_loopback_proof_of_the_installed_version(world: _World) -> None:
+    code, out, _ = world.run("providers", "--json")
+    assert code == 0
+    assert "loopback" not in next(row for row in json.loads(out) if row["name"] == "codex")
+    record_proof(world.state, "codex", version="codex-cli 1.0", loopback=False, today="2026-10-02")
+    code, out, _ = world.run("providers", "--json")
+    codex = next(row for row in json.loads(out) if row["name"] == "codex")
+    assert codex["loopback"] == {"passed": False, "date": "2026-10-02"}
+    code, text, _ = world.run("providers")
+    assert "     loopback: failed (2026-10-02)" in text

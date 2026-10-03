@@ -38,7 +38,7 @@ from .keys import PresetKey, preset_key
 _AGY_MODEL_ID_PATTERN = re.compile(r"[a-z0-9]+(?:[.\-][a-z0-9]+)*")
 
 #: The only providers with a live-list query (parallel-runs design §3.6).
-_QUERIED_PROVIDERS = frozenset({"opencode", "agy", "openrouter"})
+QUERIED_PROVIDERS = frozenset({"opencode", "agy", "openrouter"})
 _OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 
@@ -126,7 +126,7 @@ def live_models(
     home: Path,
     timeout_seconds: float = 5.0,
 ) -> LiveList:
-    if provider not in _QUERIED_PROVIDERS:
+    if provider not in QUERIED_PROVIDERS:
         return LiveList("catalogue-only", (), "no live-list query specified")
     try:
         if provider == "openrouter":
@@ -175,6 +175,7 @@ def live_models(
 __all__ = [
     "LiveList",
     "PresetKey",
+    "QUERIED_PROVIDERS",
     "live_models",
     "parse_agy",
     "parse_opencode",

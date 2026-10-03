@@ -21,12 +21,14 @@ A link's model, first match wins:
 
 from __future__ import annotations
 
+import difflib
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
 from .config_paths import ConfigPathError, config_dir, config_file
+from .model_catalog import CatalogueError, load_catalogue
 from .registry import PROVIDER_NAMES
 
 #: The rails that choose a safe model of their own when given none.
@@ -183,9 +185,37 @@ def model_sources_for(
     )
 
 
+def check_known_model(provider: str, model: str, *, environ: Mapping[str, str], home: Path) -> None:
+    """Refuse a model id neither the catalogue nor the provider's live list knows (spec
+    0.5.4 §3.8 a). No catalogue, a broken one, or a provider it does not cover: nothing
+    is checked -- the catalogue is the operator's, and its absence is no error here."""
+    try:
+        path = config_file("catalog.toml", environ, home=home)
+        if path is None or not model:
+            return
+        catalogue = load_catalogue(path)
+    except (ConfigPathError, CatalogueError):
+        return
+    known = [entry.model for entry in catalogue.entries if entry.provider == provider]
+    if not known or model in known:
+        return
+    from . import model_live  # model_live imports engine, which imports this module
+
+    live_note = ""
+    if provider in model_live.QUERIED_PROVIDERS:
+        live = model_live.live_models(provider, environ=environ, home=home)
+        if live.status == "available" and model in live.models:
+            return
+        live_note = f" nor in {provider}'s live list ({live.status})"
+    close = difflib.get_close_matches(model, known, n=3)
+    hint = f"; close ids: {', '.join(close)}" if close else f"; known: {', '.join(known[:5])}"
+    raise ModelsError(f"{provider}: model {model!r} is not in {path}{live_note}{hint}; nothing ran")
+
+
 __all__ = [
     "MODEL_OPTIONAL",
     "ModelsError",
+    "check_known_model",
     "default_models_path",
     "load_models",
     "models_for",
