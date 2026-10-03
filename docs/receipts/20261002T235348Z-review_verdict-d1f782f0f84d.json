@@ -1,0 +1,78 @@
+{
+  "digest": "sha256:d1f782f0f84d74cf9507dfb7c68044b00d885eb3aaba6eb2c64a0c8a66a41ac9",
+  "idempotency_key": "review_verdict:eba11b6f4179c8f3c91929b66b7e1ef21e4c877a:111075667838",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": true,
+      "carry_forwards": {
+        "addressed": [],
+        "deferred": []
+      },
+      "check_run_id": 111075667838,
+      "diff_truncated": false,
+      "finding_count": 4,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "The documentation paragraph added for `ha init` is written as a single line exceeding 270 characters, which stands out from the ~100-character wrapping used in the rest of the file.",
+          "file": "README.md",
+          "id": "F-4-1",
+          "line": 508,
+          "severity": "minor",
+          "status": "new",
+          "title": "Unwrapped long line"
+        },
+        {
+          "class": "note",
+          "evidence": "The markdown code block for `test_keep_branch_without_force_is_a_usage_error` begins with the python code directly, missing the opening \"```python\" delimiter.",
+          "file": "docs/plans/2026-10-02-ha-0.5.4.md",
+          "id": "F-4-2",
+          "line": 851,
+          "severity": "minor",
+          "status": "new",
+          "title": "Missing python code block opening"
+        },
+        {
+          "class": "blocker",
+          "evidence": "In `record_proof`, when `version` changes due to a rail upgrade, omitted fields like `keep.loopback if keep else None` are unconditionally copied from the previous record without checking if `keep.version == version`. Because the new `loopback` proof is opt-in and omitted from the default `ha prove ",
+          "file": "src/headless_agents/proofs.py",
+          "id": "F-4-3",
+          "line": null,
+          "severity": "blocking",
+          "status": "new",
+          "title": "Old proofs carried over to new version"
+        },
+        {
+          "class": "note",
+          "evidence": "In `_quarantine_of`, the path relative to `<state>` is built using `path.relative_to(path.parents[1])`. While this currently resolves correctly because quarantines are always directly inside the `<state>/quarantine/` directory, it is brittle. Passing `state` to `_quarantine_of` and using `path.relat",
+          "file": "src/headless_agents/retire.py",
+          "id": "F-4-4",
+          "line": null,
+          "severity": "minor",
+          "status": "new",
+          "title": "Fragile relative path resolution for quarantines"
+        }
+      ],
+      "independent": true,
+      "mode": "deep",
+      "pr": 4,
+      "providers": [
+        "agy",
+        "agy",
+        "agy",
+        "agy"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "eba11b6f4179c8f3c91929b66b7e1ef21e4c877a",
+      "verdict": "request_changes"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-02T23:53:48.707914Z",
+  "schema_version": 1
+}
