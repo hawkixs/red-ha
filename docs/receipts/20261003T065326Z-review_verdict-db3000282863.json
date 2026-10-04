@@ -1,0 +1,48 @@
+{
+  "digest": "sha256:db3000282863920a6628ad7efe124a7a304eb41ce7e22c6591ab3f4867663fd4",
+  "idempotency_key": "review_verdict:62cc7663f78776ba37aefad3fdbcdc161ef439d6:111150099810",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": false,
+      "carry_forwards": {
+        "addressed": [],
+        "deferred": [
+          "CF-4-3"
+        ]
+      },
+      "check_run_id": 111150099810,
+      "diff_truncated": false,
+      "finding_count": 1,
+      "findings": [
+        {
+          "class": "blocker",
+          "evidence": "CF-4-3 is an open carry-forward: list it under `## Carry-forwards` as one line, CF-<pr>-<n>: addressed | CF-<pr>-<n>: deferred: <reason>",
+          "file": "(pull request description)",
+          "id": "F-5-1",
+          "line": null,
+          "severity": "blocking",
+          "status": "fixed",
+          "title": "CF-4-3 not accounted for"
+        }
+      ],
+      "independent": true,
+      "mode": "deep",
+      "pr": 5,
+      "providers": [
+        "agy",
+        "codex"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 2,
+      "sha": "62cc7663f78776ba37aefad3fdbcdc161ef439d6",
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-03T06:53:26.886135Z",
+  "schema_version": 1
+}

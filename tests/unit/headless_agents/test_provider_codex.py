@@ -522,11 +522,34 @@ class TestRunCodex:
         env = kwargs["env"]
         assert isinstance(env, dict)
         # Q80 = a: the run's own CODEX_HOME is added, nothing else.
-        assert {k: v for k, v in env.items() if k != "CODEX_HOME"} == {
+        assert {k: v for k, v in env.items() if k not in ("CODEX_HOME", "AI_AGENT")} == {
             "PATH": "/usr/bin",
             "EXAMPLE_TOKEN": "token-placeholder",
         }
         assert kwargs["start_new_session"] is True
+
+    def test_the_worker_names_itself_so_the_rail_records_an_agent(
+        self, monkeypatch: pytest.MonkeyPatch, logs: dict[str, Path]
+    ) -> None:
+        fake = _FakeProcess(
+            returncode=0, events=_events(_completed_call("example"), _turn_completed()), report="R"
+        )
+        captured = _install(monkeypatch, fake, logs["report_log"])
+
+        # The operator's own session marker must not survive: the worker is codex.
+        assert (
+            _run(
+                logs,
+                environment={
+                    "PATH": "/usr/bin",
+                    "EXAMPLE_TOKEN": "token-placeholder",
+                    "AI_AGENT": "claude-code",
+                },
+            )
+            == 0
+        )
+        env = captured["kwargs"]["env"]  # type: ignore[index]
+        assert env["AI_AGENT"] == "codex"
 
     def test_refuses_to_start_when_the_environment_lacks_the_bearer_variable(
         self, monkeypatch: pytest.MonkeyPatch, logs: dict[str, Path]
