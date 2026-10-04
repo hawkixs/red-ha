@@ -262,13 +262,22 @@ def test_a_codex_failure_that_is_not_a_sandbox_refusal_proves_nothing(tmp_path: 
     assert refused_attempts("codex", run, [config, ref], line=LINE) == set()
 
 
-def _agy(state: str, path: Path, tool: str = "write_to_file", output: str = "") -> str:
-    step = {
-        "state": state,
-        "step_type": "tool",
-        "tool_name": tool,
-        "tool_info": {"name": tool, "parameters": {"TargetFile": str(path)}, "output": output},
+def _agy(
+    state: str,
+    path: Path,
+    tool: str = "write_to_file",
+    output: str = "",
+    error: str | None = None,
+) -> str:
+    info: dict[str, object] = {
+        "name": tool,
+        "parameters": {"TargetFile": str(path)},
+        "output": output,
     }
+    if error is not None:
+        # agy 1.2.16 reports a failed tool under tool_info.error, not under output.
+        info["error"] = {"type": "TOOL_ERROR", "message": error}
+    step = {"state": state, "step_type": "tool", "tool_name": tool, "tool_info": info}
     return json.dumps({"event": "step_update", "step_update": step})
 
 
@@ -297,6 +306,34 @@ def test_an_agy_write_refused_with_an_outside_workspace_message_counts(tmp_path:
         )
     )
     assert refused_attempts("agy", run, [config, ref]) == {config}
+
+
+def test_an_agy_refusal_reported_under_tool_info_error_counts(tmp_path: Path) -> None:
+    """Measured on agy 1.2.16 (ticket da5bf74a): the guard's refusal sits in
+    ``tool_info.error.message``; reading only ``output`` left the proof inconclusive."""
+    run = tmp_path / "run"
+    run.mkdir()
+    config, ref = _targets(tmp_path)
+    refusal = "tool call denied by pre-tool hook: write_to_file.TargetFile is outside the workspace"
+    (run / "events.jsonl").write_text(
+        "\n".join(
+            [
+                _agy("ERROR", config, error=refusal),
+                _agy("ERROR", ref, tool="view_file", error=refusal),
+            ]
+        )
+    )
+    assert refused_attempts("agy", run, [config, ref]) == {config}
+
+
+def test_an_agy_error_naming_another_cause_under_tool_info_error_proves_nothing(
+    tmp_path: Path,
+) -> None:
+    run = tmp_path / "run"
+    run.mkdir()
+    config, _ = _targets(tmp_path)
+    (run / "events.jsonl").write_text(_agy("ERROR", config, error="no such file or directory"))
+    assert refused_attempts("agy", run, [config]) == set()
 
 
 def test_no_log_is_no_evidence(tmp_path: Path) -> None:

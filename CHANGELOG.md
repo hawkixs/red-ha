@@ -29,6 +29,14 @@ member rode a brain-v42 tag.
 
 ### Fixed
 
+- `ha prove agy --confinement` could never conclude on agy 1.2.16: the guard's refusal of an
+  outside write is reported under `tool_info.error.message`, which the evidence reader did not
+  look at, so no refused attempt was found ("no logged, refused attempt on: ..."). It now reads
+  that field too, and still counts only a write tool step on the target that ended `ERROR` with
+  a refusal message. Replayed on the three kept runs of a live 1.2.16 proof, it finds exactly the
+  outside target of each run, never the control file. The 1.2.15 symptom of the ticket (control
+  file not written) did not reproduce on 1.2.16. Re-run `ha prove agy` after installing to
+  record the proof (Brain ticket da5bf74a).
 - `ha clean RUN` no longer ends in an uncaught `GitTampered` traceback when the run's source
   repository was deleted: it exits 1, names the repository and says nothing was cleaned.
   `ha clean --force` already refused cleanly. A documented way to retire a run whose
