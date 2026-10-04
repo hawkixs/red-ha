@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -1572,6 +1573,21 @@ def test_clean_removes_a_committed_write_worktree_and_keeps_the_rest(world: Worl
     assert world.registry().resolve(outcome.run_id).cleaned_at is not None
     assert lineage.load(world.state, outcome.run_id).members[outcome.run_id] == "committed"
     assert provenance.lookup(world.state, tip) is not None
+
+
+def test_clean_of_a_run_whose_repository_was_deleted_refuses_cleanly(world: World) -> None:
+    """Ticket b96ee580: no traceback, a refusal that names the missing repository."""
+    world.agent.edit = _edit_app
+    outcome = world.write()
+    shutil.rmtree(world.repo)
+    world.said.clear()
+
+    assert _clean(world, outcome.run_id) == 1
+    said = "\n".join(world.said)
+    assert str(world.repo) in said
+    assert "nothing cleaned" in said
+    assert outcome.run_dir.exists()
+    assert world.registry().resolve(outcome.run_id).cleaned_at is None
 
 
 def test_clean_waits_for_a_lineage_in_use_then_refuses(

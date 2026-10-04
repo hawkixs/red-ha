@@ -791,6 +791,16 @@ def _force(world: World, run_id: str, **kwargs: bool) -> int:
     )
 
 
+def test_force_of_a_run_whose_repository_was_deleted_refuses_cleanly(world: World) -> None:
+    """Ticket b96ee580: ``--force`` inspects through git too, so it must not crash either."""
+    owner = _compromised_write(world)
+    shutil.rmtree(world.repo)
+    world.said.clear()
+
+    assert _force(world, owner) == 1
+    assert str(world.repo) in "\n".join(world.said)
+
+
 def test_force_retires_a_compromised_lineage_and_a_new_write_is_admitted(world: World) -> None:
     owner = _compromised_write(world)
     quarantine.publish(

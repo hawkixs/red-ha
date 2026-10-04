@@ -1261,12 +1261,18 @@ def clean_write(
                 return 1
         # The registry lock is released: the first git command comes now.
         if current.worktree.exists():
-            result = git(
-                current.repository,
-                ["worktree", "remove", "--force", str(current.worktree)],
-                environ,
-                state=state,
-            )
+            try:
+                result = git(
+                    current.repository,
+                    ["worktree", "remove", "--force", str(current.worktree)],
+                    environ,
+                    state=state,
+                )
+            except GitTampered as exc:
+                # A repository deleted since the run (ticket b96ee580), or one whose .git
+                # cannot be pinned: refuse, never a traceback.
+                say(f"{exc}; nothing cleaned")
+                return 1
             if result.returncode != 0:
                 say(f"git worktree remove failed: {result.stderr.strip()}; nothing cleaned")
                 return 1

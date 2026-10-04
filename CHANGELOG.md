@@ -27,6 +27,13 @@ member rode a brain-v42 tag.
 
 ## Unreleased
 
+### Fixed
+
+- `ha clean RUN` no longer ends in an uncaught `GitTampered` traceback when the run's source
+  repository was deleted: it exits 1, names the repository and says nothing was cleaned.
+  `ha clean --force` already refused cleanly. A documented way to retire a run whose
+  repository is gone is still open (Brain ticket b96ee580).
+
 ### Changed
 
 - Every CLI worker ha starts (codex, claude, opencode, agy) now exports `AI_AGENT=<provider>`,
