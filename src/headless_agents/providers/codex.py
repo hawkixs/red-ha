@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from ..capability import (
+    AGENT_MARKER_VARIABLE,
     PROVIDER_FALLBACK_EXIT_CODE,
     TIMEOUT_EXIT_CODE,
     TIMEOUT_REPLAYABLE_EXIT_CODE,
@@ -1352,6 +1353,7 @@ def run_codex(
             dict(child_environment) if child_environment is not None else dict(os.environ)
         )
         run_environment["CODEX_HOME"] = str(ephemeral_home)
+        run_environment[AGENT_MARKER_VARIABLE] = "codex"
         schema_file = (
             _write_output_schema(ephemeral_home, output_schema)
             if output_schema is not None

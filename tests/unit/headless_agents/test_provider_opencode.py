@@ -650,6 +650,22 @@ def _run(tmp_path: Path, **overrides: object) -> int:
 
 
 class TestRunOpenCode:
+    def test_the_worker_names_itself_even_over_an_inherited_marker_and_actor(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        captured = _install(monkeypatch, _FakeProcess(returncode=0, events=GOOD_EVENTS))
+
+        environment = {
+            "PATH": "/usr/bin",
+            "EXAMPLE_TOKEN": "scoped-token",
+            "AI_AGENT": "claude-code",
+            "RAIL_ACTOR": "operator",
+        }
+        assert _run(tmp_path, environment=environment) == 0
+        env = captured["kwargs"]["env"]  # type: ignore[index]
+        assert env["AI_AGENT"] == "opencode"
+        assert "RAIL_ACTOR" not in env
+
     def test_runs_in_an_ephemeral_home_with_inline_config_and_borrowed_cache(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

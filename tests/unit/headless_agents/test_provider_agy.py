@@ -299,6 +299,18 @@ def _run(tmp_path: Path, **overrides: object) -> int:
 
 
 class TestRunAgy:
+    def test_the_worker_names_itself_even_over_an_inherited_marker_and_actor(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(_mcp_step(), {"event": "result", "result": {"response": "REPORT"}})
+        captured = _install(monkeypatch, _FakeProcess(returncode=0, events=events))
+
+        environment = {"PATH": "/usr/bin", "AI_AGENT": "claude-code", "RAIL_ACTOR": "operator"}
+        assert _run(tmp_path, environment=environment) == 0
+        env = captured["kwargs"]["env"]  # type: ignore[index]
+        assert env["AI_AGENT"] == "agy"
+        assert "RAIL_ACTOR" not in env
+
     def test_runs_in_an_ephemeral_home_built_from_the_profile(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -316,6 +328,7 @@ class TestRunAgy:
             "PATH": "/usr/bin",
             "LANG": "fr_FR.UTF-8",
             "TERM": "dumb",
+            "AI_AGENT": "agy",
         }
         assert kwargs["stdin"] is subprocess.DEVNULL
         files = captured["home_files"]

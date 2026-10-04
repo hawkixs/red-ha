@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Final
 
 from ..capability import (
+    AGENT_MARKER_VARIABLE,
     INVALID_USAGE_EXIT_CODE,
     PROVIDER_FALLBACK_EXIT_CODE,
     TIMEOUT_EXIT_CODE,
@@ -413,6 +414,7 @@ def run_claude(
         run_environment = dict(child_environment if child_environment is not None else os.environ)
         run_environment["HOME"] = str(isolated_home)
         run_environment["CLAUDE_CONFIG_DIR"] = str(isolated_config)
+        run_environment[AGENT_MARKER_VARIABLE] = "claude"
         mcp_config_path = runtime_dir / "mcp-config.json"
         mcp_config_path.write_text(json.dumps(build_claude_mcp_config(mcp)), encoding="utf-8")
         command = build_claude_command(

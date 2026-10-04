@@ -79,6 +79,14 @@ def failure_code_after_a_write(child_code: int) -> int:
     return 1 if child_code in FALLBACK_EXIT_CODES else child_code
 
 
+# The generic variable by which a harness names itself to the ReD rail, which
+# then records ``agent:<provider>`` for every gesture the worker runs instead of
+# reading an inherited ``RAIL_ACTOR=operator`` as the operator's own. Every CLI
+# worker ha starts sets it to its provider name, always replacing a value
+# inherited from the parent session: the worker is the provider, not the
+# session that launched ``ha``.
+AGENT_MARKER_VARIABLE = "AI_AGENT"
+
 # Variables every rail needs to run at all: locale, TLS trust, proxy policy and
 # the paths a CLI resolves against. Rail-specific additions go through
 # ``passthrough``, never in here.

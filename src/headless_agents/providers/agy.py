@@ -71,6 +71,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from ..capability import (
+    AGENT_MARKER_VARIABLE,
     INVALID_USAGE_EXIT_CODE,
     PROVIDER_FALLBACK_EXIT_CODE,
     TIMEOUT_EXIT_CODE,
@@ -575,6 +576,7 @@ def _child_environment(
         "PATH": environ.get("PATH", "/usr/bin:/bin"),
         "LANG": environ.get("LANG", "C.UTF-8"),
         "TERM": "dumb",
+        AGENT_MARKER_VARIABLE: "agy",
     }
     for name in profile.environment_passthrough:
         if name in environ and name not in child:

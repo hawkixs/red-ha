@@ -25,6 +25,18 @@ deliberately outside the `v*` pattern that names brain-v42's own version; those 
 valid. The earlier `v0.6.0` tag (2026-09-14) also carries 0.1.0; it is the last time the
 member rode a brain-v42 tag.
 
+## Unreleased
+
+### Changed
+
+- Every CLI worker ha starts (codex, claude, opencode, agy) now exports `AI_AGENT=<provider>`,
+  always replacing a value inherited from the parent session. The ReD rail resolves the
+  actor of each gesture from the environment and records `agent:<provider>` for a worker
+  that names itself, instead of attributing it to the operator. HTTP providers are
+  unchanged: they have no tools, so they run no gesture. The variable is part of the
+  child environment the rail can rely on; a profile's `environment_passthrough` cannot
+  override it (Brain ticket 5868f776).
+
 ## 0.5.4 — 2026-10-03 (tag `v0.5.4` after merge)
 
 The first release from the red-ha repository. A write left compromised or pending can now be

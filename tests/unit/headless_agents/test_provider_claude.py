@@ -432,12 +432,25 @@ class TestRunClaude:
         assert config_path.parent == kwargs["cwd"]
         env = kwargs["env"]
         assert isinstance(env, dict)
-        assert {k: v for k, v in env.items() if k not in ("HOME", "CLAUDE_CONFIG_DIR")} == {
+        assert {
+            k: v for k, v in env.items() if k not in ("HOME", "CLAUDE_CONFIG_DIR", "AI_AGENT")
+        } == {
             "PATH": "/usr/bin",
             "EXAMPLE_TOKEN": "t",
         }
         assert kwargs["stderr"] is subprocess.STDOUT
         assert (tmp_path / "out" / "raw.log").read_text(encoding="utf-8") == "ok\n"
+
+    def test_the_worker_names_itself_so_the_rail_records_an_agent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        captured = _install(monkeypatch, _FakeProcess(returncode=0, output="ok\n"))
+
+        # An AI_AGENT inherited from the operator's session is replaced.
+        environment = {"PATH": "/usr/bin", "EXAMPLE_TOKEN": "t", "AI_AGENT": "codex"}
+        assert _run(tmp_path, environment=environment) == 0
+        env = captured["kwargs"]["env"]  # type: ignore[index]
+        assert env["AI_AGENT"] == "claude"
 
     def test_refuses_to_start_without_the_bearer_variable(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
