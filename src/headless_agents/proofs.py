@@ -851,7 +851,8 @@ def refused_attempts(
       proves nothing: the model's own text is never evidence (e454b011,
       review round 1 of PR #234; lot 1b, learnings a5460289, 80934778);
     - agy: an agy write tool step on the target that ended ``ERROR`` with a
-      refusal message (agy 1.2.11 was measured to end a refused
+      refusal message, read from ``tool_info.output``, the step's ``error`` or
+      ``tool_info.error.message`` (agy 1.2.11 was measured to end a refused
       ``write_to_file`` in ``ERROR`` with NO message: it stays inconclusive).
 
     A failure that names no refusal proves nothing: it may be no write at
@@ -912,7 +913,13 @@ def refused_attempts(
             info = info if isinstance(info, dict) else {}
             parameters = info.get("parameters")
             target = parameters.get("TargetFile") if isinstance(parameters, dict) else None
-            text = f"{info.get('output') or ''} {step.get('error') or ''}".lower()
+            # agy 1.2.16 reports a failed tool as ``tool_info.error``, an object with a
+            # ``message`` (ticket da5bf74a); earlier versions used ``output`` or the step's own
+            # ``error``.
+            reported = info.get("error")
+            if isinstance(reported, dict):
+                reported = reported.get("message")
+            text = f"{info.get('output') or ''} {step.get('error') or ''} {reported or ''}".lower()
             if target in wanted and any(marker in text for marker in _AGY_REFUSALS):
                 found.add(wanted[str(target)])
     if rail == "codex" and rail_version is not None:
