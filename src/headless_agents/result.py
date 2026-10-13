@@ -64,9 +64,23 @@ class RunResult:
     raw_log: Path | None = None
     context: tuple[dict[str, object], ...] | None = None
     workspace: dict[str, object] | None = None
+    #: Spec 2026-10-13 usage and budget §3.6: what a run stopped on its budget cap had
+    #: written so far. NEVER an answer: ``text`` stays ``None`` on any nonzero exit, and
+    #: no verdict or finding is ever read from it. ``None`` on every other path.
+    partial_text: str | None = None
+    #: Set by the budget meter only (``budget_exhausted`` or ``budget_unmeasured``);
+    #: ``None`` on every path that does not set it.
+    failure_reason: str | None = None
+    #: ``False`` when ``tokens``/``cost_usd`` are only a lower bound: a model call killed
+    #: in flight, or a capped finish that lacked its measure. The run totals then read
+    #: incomplete.
+    usage_complete: bool = True
 
     def to_dict(self) -> dict[str, object]:
         """The JSON-safe schema-1 form of this result.
+
+        ``partial_text``, ``failure_reason`` and ``usage_complete`` are ``run.json``'s
+        (its step entry), not ``result.json``'s: this key set is unchanged.
 
         ``context``, ``workspace`` and ``branch`` belong to schema 1 from the
         start, so a consumer can pin the key set. ``context`` and ``workspace``

@@ -9,8 +9,10 @@ from headless_agents.report import (
     RUN_JSON,
     RUN_KEYS,
     STEP_KEYS,
+    budget_line,
     new_report,
     refused_step_entry,
+    skipped_step_entry,
     step_dir_name,
     step_entry,
     summary_line,
@@ -53,7 +55,7 @@ def test_the_run_key_set_is_the_spec_one() -> None:
         "repository", "base", "head", "branch", "lineage", "continues", "findings_from",
         "implement_providers", "commits", "failure_reason", "vendor_check", "cleanup", "pid",
         "started_at", "duration_seconds", "cost_usd", "cost_complete", "tokens",
-        "tokens_complete", "steps",
+        "tokens_complete", "budget", "steps",
     )  # fmt: skip
 
 
@@ -146,9 +148,16 @@ def test_a_step_without_counts_is_not_measured() -> None:
 TEN_TWO = {"input": 10, "output": 2, "fresh": None, "cached": None, "thinking": None}
 
 
-def test_the_step_key_set_ends_with_attempts() -> None:
-    assert STEP_KEYS[-1] == "attempts"
-    assert "budget" not in STEP_KEYS and "partial_answer" not in STEP_KEYS
+def test_the_step_key_set_ends_with_attempts_then_the_budget_keys() -> None:
+    assert STEP_KEYS[-6:] == (
+        "attempts",
+        "partial_answer",
+        "steps_after_crossing",
+        "started",
+        "failure_reason",
+        "usage_complete",
+    )
+    assert "budget" not in STEP_KEYS
 
 
 def test_a_new_report_has_empty_complete_totals() -> None:
@@ -261,3 +270,101 @@ def test_the_summary_line_marks_incomplete_figures() -> None:
         "run 20260925T000000-aaaaaaaa: exit 1, cost ≥ 0.37 USD (incomplete), "
         "input ≥ 12.0k, output ≥ 300 (incomplete)"
     )
+
+
+# ── budget (spec 2026-10-13 usage and budget §3.6) ──────────────────────────
+
+
+def test_a_new_report_has_no_budget() -> None:
+    assert _report()["budget"] is None
+
+
+def test_an_ordinary_step_started_and_carries_no_budget_record() -> None:
+    entry = step_entry(index=1, slot="run", role="r", step_dir="d", result=_result())
+    assert (entry["partial_answer"], entry["steps_after_crossing"]) == (None, None)
+    assert (entry["started"], entry["failure_reason"], entry["usage_complete"]) == (
+        True,
+        None,
+        True,
+    )
+
+
+def test_a_step_stopped_on_the_cap_keeps_its_partial_apart_from_any_answer() -> None:
+    stopped = _result(
+        exit_code=7, partial_text="half of it", failure_reason="budget_exhausted", text=None
+    )
+    entry = step_entry(
+        index=1, slot="run", role="r", step_dir="d", result=stopped, steps_after_crossing=1
+    )
+    assert entry["exit_code"] == 7 and entry["partial_answer"] == "half of it"
+    assert (entry["failure_reason"], entry["steps_after_crossing"]) == ("budget_exhausted", 1)
+
+
+def test_a_step_never_started_spent_nothing_and_says_why() -> None:
+    entry = skipped_step_entry(
+        index=2, slot="judge", role="j", step_dir="steps/02-judge-j", reason="budget_exhausted"
+    )
+    assert tuple(entry) == STEP_KEYS
+    assert (entry["exit_code"], entry["started"], entry["failure_reason"]) == (
+        None,
+        False,
+        "budget_exhausted",
+    )
+    assert (entry["tokens"], entry["cost_usd"], entry["attempts"]) == (None, None, [])
+    report = with_step(
+        _report(), step_entry(index=1, slot="review", role="a", step_dir="d", result=_result())
+    )
+    report = with_step(report, entry)
+    assert (report["tokens"], report["tokens_complete"]) == (TEN_TWO, True)
+    assert (report["cost_usd"], report["cost_complete"]) == (0.25, True)
+
+
+def test_a_refused_step_reached_its_start() -> None:
+    entry = refused_step_entry(index=1, slot="review", role="a", step_dir="d")
+    assert (entry["exit_code"], entry["started"]) == (2, True)
+
+
+def test_a_lower_bound_spend_keeps_its_figures_and_marks_the_totals_incomplete() -> None:
+    entry = step_entry(
+        index=1, slot="run", role="r", step_dir="d", result=_result(usage_complete=False)
+    )
+    report = dict(with_step(_report(), entry), exit_code=7)
+    assert (report["tokens"], report["tokens_complete"]) == (TEN_TWO, False)
+    assert (report["cost_usd"], report["cost_complete"]) == (0.25, False)
+    assert summary_line(report) == (
+        "run 20260925T000000-aaaaaaaa: exit 7, cost ≥ 0.25 USD (incomplete), "
+        "input ≥ 10, output ≥ 2 (incomplete)"
+    )
+
+
+def test_the_budget_line_names_spend_cap_and_overshoot() -> None:
+    budget = {
+        "max_cost": 0.25,
+        "max_input_tokens": 1000,
+        "spent_cost": 0.375,
+        "spent_input_tokens": 1500,
+        "spent_complete": True,
+        "overshoot_cost": 0.125,
+        "overshoot_input_tokens": 500,
+    }
+    assert budget_line(budget) == (
+        "budget  cost 0.375 of 0.25 USD (overshoot 0.125 USD), input 1.5k of 1.0k (overshoot 500)"
+    )
+
+
+def test_an_incomplete_budget_reads_at_least_and_its_overshoot_unknown() -> None:
+    budget = {
+        "max_cost": None,
+        "max_input_tokens": 1000,
+        "spent_cost": 0.5,
+        "spent_input_tokens": 2000,
+        "spent_complete": False,
+        "overshoot_cost": None,
+        "overshoot_input_tokens": None,
+    }
+    assert budget_line(budget) == "budget  input ≥ 2.0k of 1.0k (incomplete, overshoot unknown)"
+
+
+def test_an_uncapped_run_has_no_budget_line() -> None:
+    assert budget_line(None) is None
+    assert budget_line({"max_cost": None, "max_input_tokens": None}) is None
