@@ -1,6 +1,6 @@
 # Vendor rule by model vendor — design
 
-Date: 2026-10-13. Status: proposed (round 3). Follows the vibe rail (PR #9). Amends the
+Date: 2026-10-13. Status: proposed (round 4). Follows the vibe rail (PR #9). Amends the
 vendor rule of spec 0.5.0 §3.8.4 (`src/headless_agents/vendor.py`).
 
 ## 1. Problem
@@ -180,17 +180,20 @@ google.
   with their links, resolves every vendor, and refuses when any panel vendor is
   `unknown`, any author vendor is `unknown`, or a panel vendor is among the authors'
   vendors. Messages name the role, provider, model, vendor and commit.
-- **`VendorCheck` documents, new shape (`"rule": "model-vendor"`):** each commit carries
-  its `links` and resolved `vendors`; `authors` becomes the sorted union of author
-  vendors; `panel` maps each role (reviewers and judge) to its links and vendors.
-  The document also records `table_digest` (shipped table plus operator pairs) as
-  evidence of what it was judged against; `from_document` does not re-resolve with
-  today's table. It validates a new document by vendor: every commit and panel link
-  carries one vendor, `authors` is the sorted union of commit vendors, no author vendor
-  and no panel vendor is `unknown`, no panel vendor is in `authors`, the links of each
-  commit match its `providers`, `panel` is non-empty and every panel role has at least
-  one link. A commit may have no links and no vendors only when it is a presumed
-  hand-written commit (`made_by: hand`, as `_attribution_ha_makes` allows today).
+- **`VendorCheck` documents, new shape (`"rule": "model-vendor"`):** a vendor is
+  recorded in exactly one place, on the link it was resolved for: each link is
+  `{provider, model, switches, vendor}`. Each commit carries its `links`; `panel` maps
+  each role (reviewers and judge) to its links; `authors` is derived evidence, the
+  sorted union of the commits' link vendors. There is no separate per-commit or
+  per-role vendor list that could contradict the links. The document also records
+  `table_digest` (shipped table plus operator pairs) as evidence of what it was judged
+  against; `from_document` does not re-resolve with today's table. It validates a new
+  document by vendor: every link carries one non-empty vendor, `authors` equals the
+  sorted union of the commits' link vendors, no author vendor and no panel vendor is
+  `unknown`, no panel vendor is in `authors`, the links of each commit match its
+  `providers` one to one, `panel` is non-empty and every panel role has at least one
+  link. A commit may have no links only when it is a presumed hand-written commit
+  (`made_by: hand`, as `_attribution_ha_makes` allows today).
   A document without `rule` is a legacy document and keeps today's provider validation,
   so old reports, `ha show` and `--findings` (`reviews.load_result`) still read.
 
@@ -222,7 +225,9 @@ TDD, unit only (no provider is called):
 - `VendorCheck`: new-shape round-trip including the same-provider/different-lab case;
   inconsistent vendor evidence rejected; rejected through both `from_document` and
   `reviews.load_result`: an `unknown` author vendor, an empty `panel`, a panel role with
-  no links, a non-hand commit without links; a legacy document still reads;
+  no links, a non-hand commit without links, `authors` differing from the union of the
+  commits' link vendors (an Anthropic link under `authors = ["openai"]`), a link without
+  a vendor; a legacy document still reads;
 - snapshot integration: the models of a chain link, of the role and of `models.toml`'s
   default reach admission unchanged from the `SlotPlan`; an author's `--model` override
   reaches provenance; changing `models.toml` after planning does not change what
