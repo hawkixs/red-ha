@@ -1,4 +1,9 @@
-"""Per-invocation stream offsets used to measure provider usage."""
+"""Usage read from a rail's own stream (spec 2026-10-13 usage and budget §3.1).
+
+A rail reads usage only from the bytes its child wrote in THIS invocation: the offset of
+the stream is recorded when the child is launched, and a rail that returns before
+launching leaves it unset, so a reused log can never lend an earlier run's usage.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +18,8 @@ class StreamMark:
     offset: int | None = None
 
     def read(self, path: Path | None) -> str | None:
-        """Read bytes from this mark, or ``None`` when unlaunched or unreadable."""
+        """The bytes from the mark on, decoded with replacement; ``None`` when nothing
+        launched or the file cannot be read. Never raises."""
         if self.offset is None or path is None:
             return None
         try:

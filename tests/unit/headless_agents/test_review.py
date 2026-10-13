@@ -25,7 +25,7 @@ from headless_agents.engine import Overrides, Request, UsageError, execute, plan
 from headless_agents.model_vendor import LinkRecord
 from headless_agents.proofs import CLI_RAILS, record_proof
 from headless_agents.registry import Probe
-from headless_agents.result import RunResult
+from headless_agents.result import RunResult, TokenUsage
 from headless_agents.run_record import record, run_id_of
 from headless_agents.runs import Registry
 from headless_agents.spec import RunSpec
@@ -52,6 +52,8 @@ class _Agent:
     answer: str | Callable[[RunSpec], str] | None = APPROVE
     code: int = 0
     barrier: threading.Barrier | None = None
+    tokens: TokenUsage | None = None
+    cost: float | None = None
     specs: list[RunSpec] = field(default_factory=list)
 
     def run(self, spec: RunSpec) -> RunResult:
@@ -77,11 +79,12 @@ class _Agent:
                 model_reported=f"{self.name}-served",
                 report_path=spec.report_log,
                 events_log=spec.events_log,
-                tokens=None,
+                tokens=self.tokens,
                 duration_seconds=0.1,
                 tool_call_completed=False,
                 text=text if self.code == 0 else None,
                 run_id=run_id_of(spec),
+                cost_usd=self.cost,
             ),
         )
 
@@ -410,6 +413,39 @@ def test_an_independent_reviewer_reviews_an_implement_run(world: World) -> None:
         ("review", ["anthropic"])
     ]  # type: ignore[index]
     assert check["commits"][0]["run_id"] == built.run_id  # type: ignore[index]
+
+
+def test_review_phase_records_spent_fallback_attempts(world: World) -> None:
+    built = world.implement()
+    (world.home / ".config" / "ha" / "roles.toml").write_text(
+        ROLES.replace('[reviewer]\nprovider = "claude"', '[reviewer]\nchain = ["agy", "claude"]')
+    )
+    world.agents["agy"].code = 3
+    world.agents["agy"].tokens = TokenUsage(input=300, output=30)
+    world.agents["agy"].cost = 0.03
+    world.agents["claude"].tokens = TokenUsage(input=100, output=10)
+    world.agents["claude"].cost = 0.01
+    outcome = world.review("check", review_run=built.run_id)
+    assert outcome.exit_code == 0, world.said
+    report = _report(outcome)
+    assert report["steps"][0]["provider"] == "claude"
+    assert report["steps"][0]["attempts"] == [
+        {
+            "provider": "agy",
+            "model": "gemini-m",
+            "exit_code": 3,
+            "tokens": {
+                "input": 300,
+                "output": 30,
+                "fresh": None,
+                "cached": None,
+                "thinking": None,
+            },
+            "cost_usd": 0.03,
+        }
+    ]
+    assert report["tokens"]["input"] == 400
+    assert report["cost_usd"] == pytest.approx(0.04)
 
 
 def test_a_hand_written_commit_constrains_nothing(world: World) -> None:

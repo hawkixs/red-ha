@@ -1278,8 +1278,12 @@ class TestAgyUsage:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         _stale_events(tmp_path)
+        stream = USAGE_STREAM.read_text(encoding="utf-8")
 
         def popen(command: list[str], **kwargs: object) -> None:
+            stdout = kwargs["stdout"]
+            stdout.write(stream)  # type: ignore[attr-defined]
+            stdout.flush()  # type: ignore[attr-defined]
             raise OSError("no such binary")
 
         monkeypatch.setattr(agy, "guard_denies_machine_tools", lambda path: True)

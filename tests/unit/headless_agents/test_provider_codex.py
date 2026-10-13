@@ -3157,8 +3157,12 @@ class TestCodexUsage:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         self._stale(tmp_path)
+        stream = _recorded_codex_turn()
 
         def popen(command: list[str], **kwargs: object) -> None:
+            stdout = kwargs["stdout"]
+            stdout.write(stream)  # type: ignore[attr-defined]
+            stdout.flush()  # type: ignore[attr-defined]
             raise OSError("no such binary")
 
         monkeypatch.setattr(codex.subprocess, "Popen", popen)

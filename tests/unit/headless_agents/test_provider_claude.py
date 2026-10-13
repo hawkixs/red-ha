@@ -372,6 +372,28 @@ class TestAppendSystemPromptLimit:
         assert result.text is None
         assert "too long for argv" in raw_log.read_text(encoding="utf-8")
 
+    def test_refusal_removes_a_stale_raw_log_answer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setattr(claude, "MAX_APPEND_SYSTEM_PROMPT_BYTES", 20)
+        ws_dir = tmp_path / "ws"
+        ws_dir.mkdir()
+        raw_log = tmp_path / "raw.log"
+        stale_answer = tmp_path / "raw.log.answer.txt"
+        stale_answer.write_text("answer from an earlier invocation", encoding="utf-8")
+        spec = RunSpec(
+            prompt="do the thing",
+            model="m",
+            max_turns=1,
+            profile=CapabilityProfile(workspace=Workspace(path=ws_dir)),
+            executable=_fake(tmp_path, "exit 0"),
+            raw_log=raw_log,
+            environment={"PATH": "/usr/bin"},
+        )
+        result = claude.ClaudeProvider().run(spec)
+        assert result.exit_code == INVALID_USAGE_EXIT_CODE
+        assert not stale_answer.exists()
+
 
 class TestToolCallCompleted:
     def test_reads_the_otel_console_record(self, tmp_path: Path) -> None:

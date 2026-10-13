@@ -105,7 +105,11 @@ _ModelUsage = tuple[tuple[str, Mapping[str, object]], ...]
 
 @dataclass(frozen=True, kw_only=True)
 class ClaudeEnvelope:
-    """What claude's JSON envelope carries, extracted once for each consumer."""
+    """What claude's ``--output-format json`` envelope carries, extracted once.
+
+    The shared extraction step (spec 2026-10-13 usage §3.1): :func:`unwrap_claude` and the
+    claude rail both read it, each with its own aggregation.
+    """
 
     text: str | None
     cost_usd: float | None
@@ -114,7 +118,12 @@ class ClaudeEnvelope:
 
 
 def extract_claude(stdout: str) -> ClaudeEnvelope | None:
-    """Extract a Claude JSON object, including an empty object, if present."""
+    """The envelope in ``stdout``; ``None`` when stdout is not a JSON object.
+
+    ``{}`` IS an envelope -- one without a result, a cost or a usage: the claude rail
+    then answers nothing (spec 2026-10-13 usage §3.1), and :func:`unwrap_claude` still
+    returns it verbatim, as it always did.
+    """
     data = _load_object(stdout)
     if data is None:
         return None
@@ -138,7 +147,12 @@ def _total(models: _ModelUsage, key: str) -> int | None:
 
 
 def claude_usage(envelope: ClaudeEnvelope) -> TokenUsage | None:
-    """Aggregate token usage across every model reported by Claude."""
+    """The claude rail's aggregation: the whole invocation, every model summed.
+
+    ``input`` counts cache reads and cache creation; ``fresh`` is ``input - cached`` (cache
+    creation is fresh input); ``thinking`` sums ``thinkingTokens`` where reported and is
+    never added to ``output``. ``None`` without ``modelUsage``.
+    """
     models = envelope.models
     if not models:
         return None
@@ -202,7 +216,7 @@ def unwrap_claude(stdout: str, *, expected_model: str | None = None) -> Reply:
 
 
 def _codex_turn_usage(usage: Mapping[str, object]) -> TokenUsage | None:
-    """Read a single completed Codex turn's usage, or none when it is empty."""
+    """One ``turn.completed`` usage block; ``None`` when it is empty."""
     if not usage:
         return None
     input_tokens = _int(usage, "input_tokens")
@@ -241,7 +255,11 @@ def unwrap_codex(stdout: str) -> Reply:
 
 
 def codex_usage(stdout: str) -> TokenUsage | None:
-    """Measure a Codex stream only when it contains exactly one completed turn."""
+    """The codex rail's reader: the usage of the ONE ``turn.completed`` of the stream.
+
+    Measured 2026-10-13 on 1,029 logs: ``codex exec`` writes exactly one per run. A stream
+    with more is not measured until a recording shows what they mean -- never a guessed sum.
+    """
     turns = [event for event in _jsonl(stdout) if event.get("type") == "turn.completed"]
     if len(turns) != 1:
         return None
@@ -260,7 +278,7 @@ def _agy_usage(usage: Mapping[str, object]) -> TokenUsage | None:
 
 
 def _agy_result(stdout: str) -> Mapping[str, object] | None:
-    """Return the result object from the final result event, if any."""
+    """The ``result`` of the LAST ``result`` event of a stream-json output, if any."""
     result: Mapping[str, object] | None = None
     for event in _jsonl(stdout):
         if event.get("event") == "result":
@@ -283,7 +301,13 @@ def unwrap_agy(stdout: str) -> Reply:
 
 
 def agy_usage(stdout: str) -> TokenUsage | None:
-    """Read and normalise usage from the final agy result event."""
+    """The agy rail's reader: the final ``result`` event of its stream-json output.
+
+    agy's ``input_tokens`` EXCLUDES cache reads (measured on 15 real result events:
+    ``total_tokens = input_tokens + output_tokens`` every time, ``cache_read_tokens`` up to
+    15x ``input_tokens``), so ``input`` is their sum, like the other rails (spec amendment
+    A3).
+    """
     result = _agy_result(stdout)
     if result is None:
         return None
