@@ -1,0 +1,54 @@
+{
+  "digest": "sha256:2380a1df465ecd09bb9ec82baf99bfb0bebec85c1dbbf5ad361dfa7b407b8bf1",
+  "idempotency_key": "review_verdict:b8c9e477bdf930ff2530aa8a162bdb81d52b708f:115482462239",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "spec_plan",
+      "blocking": false,
+      "check_run_id": 115482462239,
+      "diff_truncated": false,
+      "finding_count": 2,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "The Propagation bullet lists the budget object keys as {max_cost, max_input_tokens, spent_cost, spent_input_tokens, overshoot_cost, overshoot_input_tokens}, but \u00a73.6 states twice that budget gets spent_complete: false (Missing measurement under a cap, In-flight calls) and the PR2 test plan pins spen",
+          "file": "docs/specs/2026-10-13-usage-and-budget-design.md",
+          "id": "F-17-1",
+          "line": 314,
+          "severity": "minor",
+          "status": "new",
+          "title": "budget object enumeration omits spent_complete"
+        },
+        {
+          "class": "note",
+          "evidence": "\u00a73.7 adds exit code 7 to the run epilog, the README provider example and summary, and the HTTP-provider refusal note, but no item documents the new user-facing options --max-cost/--max-input-tokens (CLI usage, roles.toml max_cost/max_input_tokens keys) in README or help; consider adding them to the ",
+          "file": "docs/specs/2026-10-13-usage-and-budget-design.md",
+          "id": "F-17-2",
+          "line": 320,
+          "severity": "minor",
+          "status": "new",
+          "title": "Documentation scope covers exit 7 but not the new cap options"
+        }
+      ],
+      "independent": true,
+      "mode": "light",
+      "not_reviewed": [],
+      "pr": 17,
+      "providers": [
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "b8c9e477bdf930ff2530aa8a162bdb81d52b708f",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T19:07:07.104025Z",
+  "schema_version": 1
+}
