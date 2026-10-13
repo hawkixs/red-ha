@@ -421,3 +421,18 @@ The CHANGELOG gets an entry under Unreleased.
 
   The isolation proof plants both.
 
+### A2 — Mistral Large 4 (2026-10-13)
+
+- **Model aliases.** The Mistral models API lists `mistral-large-4` (alias
+  `mistral-large-4-0`), a reasoning model, separately from `mistral-large-latest`, which is
+  an alias of `mistral-large-2512` (Large 3). Every measurement before this amendment used
+  Large 3.
+- **Compatibility.** Two runs of Vibe 2.26.0 with `mistral-large-4` behaved like the Large 3
+  runs. A read completed. A write inside the workdir completed. A write outside was denied
+  `tool_denied` after a `callback`, and nothing was written outside.
+- **New entry type.** The stream also carries `reasoning` entries (the model's reasoning
+  text) before assistant messages. They are neither effects nor messages: the validity rule
+  (§3.6) and the predicates are unaffected, and two recorded fixtures pin this.
+- **Recommended model.** `mistral-large-4` is the model the documentation and the live tests
+  use.
+
