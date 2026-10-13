@@ -1,7 +1,7 @@
 """``RunSpec`` -- the common input shape across the providers.
 
 Not every field applies to every provider -- ``reasoning_effort`` is
-Codex-only, ``max_turns`` and ``raw_log`` are Claude-only, ``workspace`` is
+Codex-only, ``max_turns`` is for Claude and vibe, ``raw_log`` is Claude-only, ``workspace`` is
 Codex-only. Fields irrelevant to a given rail are simply left at their
 default. ``raw_log`` exists as its own field rather than reusing ``events_log``
 or ``report_log`` because Claude does not distinguish them: ``run_claude``

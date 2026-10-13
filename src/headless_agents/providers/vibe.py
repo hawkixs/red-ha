@@ -36,16 +36,41 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import tempfile
+import time
 import tomllib
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
-from ..capability import AGENT_MARKER_VARIABLE
+from ..capability import (
+    AGENT_MARKER_VARIABLE,
+    INVALID_USAGE_EXIT_CODE,
+    PROVIDER_FALLBACK_EXIT_CODE,
+    TIMEOUT_EXIT_CODE,
+    failure_code_after_a_write,
+    terminate_process_group,
+)
 from ..event_log import read_events
 from ..keys import KeysError, preset_key
+from ..procgroup import preexec_for, spawn_watched
 from ..profile import CapabilityProfile, Workspace
+from ..result import RunResult
+from ..run_record import answer_text, record, run_id_of
+from ..sandbox import ephemeral_root as default_ephemeral_root
+from ..sandbox import refuse_home_under_workspace
+from ..spec import RunSpec
+from ..structured import refuse_unsupported
+from ..workspace import (
+    armed_run,
+    prepend,
+    rail_preamble,
+    settle_run,
+    workspace_of,
+    workspace_summary,
+)
 
 SUPPORTED_VERSION: Final = "2.26.0"
 CLOSED_LOOPBACK: Final = "http://127.0.0.1:9"
@@ -367,3 +392,271 @@ def child_environment(
         if name in ambient and name not in child and not name.upper().startswith("VIBE_"):
             child[name] = ambient[name]
     return child
+
+
+def _effective_timeout(timeout_seconds: float, deadline: float | None) -> float:
+    if deadline is None:
+        return timeout_seconds
+    return max(0.0, min(timeout_seconds, deadline - time.monotonic()))
+
+
+def _refusal(
+    model: str, profile: CapabilityProfile, ambient: Mapping[str, str]
+) -> tuple[str | None, str | None]:
+    """``(reason, None)`` to refuse before anything starts (exit 2), else ``(None, key)``."""
+    try:
+        validate_model(model)
+    except ValueError as exc:
+        return str(exc), None
+    if profile.mcp is not None:
+        return "vibe: MCP servers are not supported on this rail (spec D13): run refused", None
+    reason = passthrough_refusal(profile)
+    if reason is not None:
+        return reason, None
+    key, reason = resolve_api_key(ambient)
+    if key is None:
+        return reason or "vibe: no Mistral key", None
+    return None, key
+
+
+def _append(stderr_log: Path, message: str) -> None:
+    with stderr_log.open("a", encoding="utf-8") as stream:
+        stream.write(f"{message}\n")
+
+
+def _failure_exit_code(
+    events_log: Path, native: int, workspace: Workspace | None, *, killed: bool
+) -> int:
+    """A failure: replayable (3) only when the stream proves nothing could have written.
+
+    Entries are emitted on completion, so a process killed by a signal may hide the
+    write it was making: in a writable workspace that is never replayable.
+    """
+    writable = workspace is not None and workspace.write
+    if tool_call_completed(events_log) or (writable and (killed or write_tool_started(events_log))):
+        return failure_code_after_a_write(native)
+    return PROVIDER_FALLBACK_EXIT_CODE
+
+
+def run_vibe(
+    *,
+    prompt: str,
+    name: str,
+    model: str,
+    timeout_seconds: float,
+    max_turns: int,
+    events_log: Path,
+    report_log: Path,
+    stderr_log: Path,
+    profile: CapabilityProfile,
+    environment: Mapping[str, str] | None = None,
+    executable: str = "vibe",
+    ephemeral_root: Path | None = None,
+    deadline: float | None = None,
+    temp_prefix: str = "headless-agents-",
+    workspace: Workspace | None = None,
+) -> int:
+    """Run one ``vibe -p`` and return its classified code (spec §3.7)."""
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    ambient = dict(environment) if environment is not None else dict(os.environ)
+    root = ephemeral_root if ephemeral_root is not None else default_ephemeral_root(ambient)
+    for path in (events_log, report_log, stderr_log):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    report_log.write_text("", encoding="utf-8")
+    if workspace is not None:
+        try:
+            refuse_home_under_workspace(
+                root if root is not None else Path(tempfile.gettempdir()), workspace
+            )
+        except ValueError as exc:
+            stderr_log.write_text(f"vibe: {exc}\n", encoding="utf-8")
+            return INVALID_USAGE_EXIT_CODE
+    # Spec §3.7: a refusal before start is 2, nothing created, nothing spawned.
+    reason, api_key = _refusal(model, profile, ambient)
+    if reason is not None or api_key is None:
+        stderr_log.write_text(f"{reason}\n", encoding="utf-8")
+        return INVALID_USAGE_EXIT_CODE
+    enabled, permissions = tool_lists(workspace)
+    config_text = vibe_config(model=model, permissions=permissions)
+
+    def _run(base: Path) -> int:
+        home = build_vibe_home(root=base, name=name, config_text=config_text)
+        workdir = workspace.path if workspace is not None else private_workdir(home)
+        command = build_vibe_command(
+            workdir=workdir, enabled=enabled, max_turns=max_turns, executable=executable
+        )
+        remaining = _effective_timeout(timeout_seconds, deadline)
+        if remaining <= 0:
+            stderr_log.write_text(
+                "vibe not launched: the caller's deadline had already expired\n", encoding="utf-8"
+            )
+            return TIMEOUT_EXIT_CODE
+        with (
+            events_log.open("w", encoding="utf-8") as events_stream,
+            stderr_log.open("w", encoding="utf-8") as stderr_stream,
+        ):
+            try:
+                process, lifeline = spawn_watched(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=events_stream,
+                    stderr=stderr_stream,
+                    cwd=home,
+                    # Rebuilt inside run_vibe around the ephemeral HOME and the resolved key.
+                    env=child_environment(home, ambient, profile, api_key=api_key),
+                    text=True,
+                    start_new_session=True,
+                    preexec_fn=preexec_for(os.getpid()),
+                )
+            except OSError as exc:
+                stderr_stream.write(f"unable to start vibe: {exc}\n")
+                return PROVIDER_FALLBACK_EXIT_CODE
+            timed_out = False
+            try:
+                try:
+                    # communicate() writes the prompt, closes stdin (an open stdin hangs
+                    # vibe, measured s10) and waits, all under one timeout.
+                    process.communicate(input=prompt, timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    terminate_process_group(process)
+                    timed_out = True
+            except BaseException:
+                terminate_process_group(process)
+                raise
+            finally:
+                lifeline.release()
+        extract_report(events_log, report_log)
+        if timed_out:
+            # Operator ruling 2026-10-13 (spec §3.7): vibe never returns 4. Its stream is
+            # emitted on completion, so it can never prove that no tool call was issued --
+            # the case capability.TIMEOUT_REPLAYABLE_EXIT_CODE excludes, as for claude.
+            _append(
+                stderr_log,
+                f"vibe reached its deadline ({int(remaining)} s); its completion-only stream "
+                "cannot prove that no tool call started: 124, the chain stops here",
+            )
+            return TIMEOUT_EXIT_CODE
+        returncode = int(process.returncode or 0)
+        if returncode != 0:
+            native = returncode if returncode > 0 else 1
+            return _failure_exit_code(events_log, native, workspace, killed=returncode < 0)
+        error = stream_error(events_log)
+        if error is not None:
+            _append(stderr_log, error)
+            return _failure_exit_code(events_log, 1, workspace, killed=False)
+        return 0
+
+    if root is not None:
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=temp_prefix, dir=str(root)) as temporary:
+            return _run(Path(temporary))
+    with tempfile.TemporaryDirectory(prefix=temp_prefix) as temporary:
+        return _run(Path(temporary))
+
+
+_READ_NOTE = "Use read_file inside the workspace."
+_TOOLS_NOTE: Final = {"read": _READ_NOTE, "write": f"{_READ_NOTE} Write with write_file and edit."}
+
+
+def _preamble_for(spec: RunSpec, workspace: Workspace | None) -> str:
+    mode = "write" if workspace is not None and workspace.write else "read"
+    return rail_preamble(spec, tools_note=_TOOLS_NOTE[mode])
+
+
+class VibeProvider:
+    """:class:`~headless_agents.protocol.AgentProvider` adapter over Mistral Vibe.
+
+    ``spec.max_turns`` becomes ``--max-turns``; ``spec.reasoning_effort`` is
+    not used (Vibe 2.26.0 has no per-run effort option).
+    """
+
+    name = "vibe"
+
+    def __init__(self, *, ephemeral_root: Path | None = None) -> None:
+        self._ephemeral_root = ephemeral_root
+
+    def _root(self, environ: Mapping[str, str]) -> Path:
+        if self._ephemeral_root is not None:
+            return self._ephemeral_root
+        return default_ephemeral_root(environ) or Path(tempfile.gettempdir())
+
+    def build_command(self, spec: RunSpec) -> list[str]:
+        refuse_unsupported(self.name, spec.output_schema)
+        workspace = workspace_of(spec)
+        environ = spec.environment if spec.environment is not None else os.environ
+        home = self._root(environ) / spec.name
+        enabled, _ = tool_lists(workspace)
+        return build_vibe_command(
+            workdir=workspace.path if workspace is not None else private_workdir(home),
+            enabled=enabled,
+            max_turns=spec.max_turns,
+            executable=spec.executable or "vibe",
+        )
+
+    def child_environment(self, spec: RunSpec, environ: Mapping[str, str]) -> dict[str, str] | None:
+        return None
+
+    def prepare_home(self, spec: RunSpec) -> Path | None:
+        refuse_unsupported(self.name, spec.output_schema)
+        environ = spec.environment if spec.environment is not None else os.environ
+        _, permissions = tool_lists(workspace_of(spec))
+        return build_vibe_home(
+            root=self._root(environ),
+            name=spec.name,
+            config_text=vibe_config(model=spec.model, permissions=permissions),
+        )
+
+    def tool_call_completed(self, spec: RunSpec) -> bool:
+        return False if spec.events_log is None else tool_call_completed(spec.events_log)
+
+    def run(self, spec: RunSpec) -> RunResult:
+        refuse_unsupported(self.name, spec.output_schema)
+        spec = spec.with_run_dir_defaults()
+        assert (
+            spec.events_log is not None
+            and spec.report_log is not None
+            and spec.stderr_log is not None
+        )
+        workspace = workspace_of(spec)
+        context = None if spec.context is None else tuple(spec.context.to_list())
+        prompt = prepend(_preamble_for(spec, workspace), spec.prompt)
+        start = time.monotonic()
+        tripwire = armed_run(workspace)
+        exit_code = run_vibe(
+            prompt=prompt,
+            name=spec.name,
+            model=spec.model,
+            timeout_seconds=spec.timeout_seconds,
+            max_turns=spec.max_turns,
+            events_log=spec.events_log,
+            report_log=spec.report_log,
+            stderr_log=spec.stderr_log,
+            profile=spec.profile,
+            environment=spec.environment,
+            executable=spec.executable or "vibe",
+            ephemeral_root=self._ephemeral_root,
+            deadline=spec.deadline,
+            workspace=workspace,
+        )
+        duration = time.monotonic() - start
+        exit_code, git_tampered = settle_run(tripwire, exit_code, spec.stderr_log)
+        return record(
+            spec,
+            RunResult(
+                exit_code=exit_code,
+                provider=self.name,
+                model=spec.model,
+                report_path=spec.report_log,
+                events_log=spec.events_log,
+                tokens=None,
+                duration_seconds=duration,
+                tool_call_completed=self.tool_call_completed(spec),
+                cost_usd=None,
+                text=answer_text(spec.report_log, exit_code=exit_code),
+                run_id=run_id_of(spec),
+                stderr_log=spec.stderr_log,
+                workspace=workspace_summary(workspace, git_tampered),
+                context=context,
+            ),
+        )

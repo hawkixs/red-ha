@@ -7,18 +7,31 @@ rewritten (spec 2026-10-13-vibe-rail-design.md, Appendix A).
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import shlex
 import shutil
+import signal
 import stat
+import subprocess
+import time
 import tomllib
 from pathlib import Path
 
 import pytest
 
-from headless_agents.profile import CapabilityProfile, Workspace
+from headless_agents.capability import (
+    INVALID_USAGE_EXIT_CODE,
+    PROVIDER_FALLBACK_EXIT_CODE,
+    TIMEOUT_EXIT_CODE,
+)
+from headless_agents.profile import CapabilityProfile, McpServer, Workspace
 from headless_agents.providers import vibe
+from headless_agents.spec import RunSpec
 
 FIXTURES = Path(__file__).parent / "fixtures" / "vibe"
+KEY_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "MISTRAL_API_KEY": "test-key"}
 
 
 class TestValidateModel:
@@ -410,3 +423,346 @@ class TestChildEnvironment:
         child = vibe.child_environment(tmp_path, ambient, profile, api_key="resolved")
         assert child["HOME"] == str(tmp_path)
         assert child["MISTRAL_API_KEY"] == "resolved"
+
+
+def _fake_vibe(
+    tmp_path: Path,
+    *,
+    stdout_file: Path | None = None,
+    exit_code: int = 0,
+    sleep_seconds: float = 0.0,
+    record_dir: Path | None = None,
+) -> Path:
+    """A real executable standing in for vibe: it records its argv, environment, cwd
+    and stdin, prints a recorded stream, then exits with ``exit_code``."""
+    script = tmp_path / "bin" / "vibe"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["#!/usr/bin/env bash"]
+    if record_dir is not None:
+        q = shlex.quote(str(record_dir))
+        lines += [
+            f"mkdir -p {q}",
+            f'printf "%s\\n" "$@" > {q}/argv',
+            f"env > {q}/env",
+            f"pwd > {q}/cwd",
+            f"cat > {q}/stdin",
+            f'cp "$VIBE_HOME/config.toml" {q}/config.toml',
+        ]
+    else:
+        lines.append("cat > /dev/null")
+    if stdout_file is not None:
+        lines.append(f"cat {shlex.quote(str(stdout_file))}")
+    if sleep_seconds:
+        lines.append(f"sleep {sleep_seconds}")
+    lines.append(f"exit {exit_code}")
+    script.write_text("\n".join(lines) + "\n")
+    script.chmod(0o755)
+    return script
+
+
+def _run(tmp_path: Path, script: Path, **overrides: object) -> int:
+    logs = tmp_path / "logs"
+    arguments: dict[str, object] = {
+        "prompt": "do it",
+        "name": "run",
+        "model": "mistral-large-latest",
+        "timeout_seconds": 30.0,
+        "max_turns": 50,
+        "events_log": logs / "events.jsonl",
+        "report_log": logs / "report.log",
+        "stderr_log": logs / "stderr.log",
+        "profile": CapabilityProfile(),
+        "environment": KEY_ENV,
+        "executable": str(script),
+        "ephemeral_root": tmp_path / "homes",
+    }
+    arguments.update(overrides)
+    (tmp_path / "homes").mkdir(exist_ok=True)
+    return vibe.run_vibe(**arguments)  # type: ignore[arg-type]
+
+
+class TestRunVibe:
+    def test_a_valid_read_returns_0_with_its_report(self, tmp_path: Path) -> None:
+        record = tmp_path / "record"
+        script = _fake_vibe(
+            tmp_path, stdout_file=FIXTURES / "read-ok.events.jsonl", record_dir=record
+        )
+        assert _run(tmp_path, script) == 0
+        assert (tmp_path / "logs" / "report.log").read_text().strip()
+        argv = (record / "argv").read_text().splitlines()
+        assert argv[-1] == "-p" and "--trust" not in argv
+        assert (record / "stdin").read_text() == "do it"
+        env = dict(
+            line.split("=", 1) for line in (record / "env").read_text().splitlines() if "=" in line
+        )
+        assert env["MISTRAL_API_KEY"] == "test-key" and env["AI_AGENT"] == "vibe"
+        assert not [k for k in env if k.startswith("VIBE_") and k != "VIBE_HOME"]
+        assert tomllib.loads((record / "config.toml").read_text())["enable_connectors"] is False
+
+    def test_the_cwd_is_the_ephemeral_home_and_it_is_removed(self, tmp_path: Path) -> None:
+        record = tmp_path / "record"
+        script = _fake_vibe(
+            tmp_path, stdout_file=FIXTURES / "read-ok.events.jsonl", record_dir=record
+        )
+        _run(tmp_path, script)
+        cwd = Path((record / "cwd").read_text().strip())
+        assert cwd.parent.parent == tmp_path / "homes"
+        assert not cwd.exists()
+
+    def test_turn_limit_exit_zero_is_a_failure(self, tmp_path: Path) -> None:
+        script = _fake_vibe(tmp_path, stdout_file=FIXTURES / "turn-limit.events.jsonl")
+        assert _run(tmp_path, script) == PROVIDER_FALLBACK_EXIT_CODE
+        assert "without a final answer" in (tmp_path / "logs" / "stderr.log").read_text()
+
+    def test_a_zero_exit_with_bye_in_stdout_is_a_failure(self, tmp_path: Path) -> None:
+        script = _fake_vibe(tmp_path, stdout_file=FIXTURES / "sigint-bye.stdout")
+        assert _run(tmp_path, script) == PROVIDER_FALLBACK_EXIT_CODE
+
+    def test_a_failure_after_a_completed_write_is_not_replayable(self, tmp_path: Path) -> None:
+        (tmp_path / "ws").mkdir()
+        workspace = Workspace(path=tmp_path / "ws", write=True)
+        script = _fake_vibe(
+            tmp_path, stdout_file=FIXTURES / "write-inside-outside.events.jsonl", exit_code=1
+        )
+        assert _run(tmp_path, script, workspace=workspace) == 1
+
+    def test_a_failure_with_only_denied_writes_is_replayable(self, tmp_path: Path) -> None:
+        (tmp_path / "ws").mkdir()
+        workspace = Workspace(path=tmp_path / "ws", write=True)
+        script = _fake_vibe(
+            tmp_path, stdout_file=FIXTURES / "denied-by-policy.events.jsonl", exit_code=1
+        )
+        assert _run(tmp_path, script, workspace=workspace) == PROVIDER_FALLBACK_EXIT_CODE
+
+    def test_killed_by_a_signal_in_a_writable_workspace_is_not_replayable(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "ws").mkdir()
+        workspace = Workspace(path=tmp_path / "ws", write=True)
+        script = tmp_path / "bin" / "vibe"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/usr/bin/env bash\ncat > /dev/null\nkill -TERM $$\n")
+        script.chmod(0o755)
+        assert _run(tmp_path, script, workspace=workspace) == 1
+
+    def test_deadline_read_only_with_an_empty_stream_is_124(self, tmp_path: Path) -> None:
+        # Operator ruling 2026-10-13: never 4 on vibe (completion-only stream).
+        script = _fake_vibe(tmp_path, sleep_seconds=30)
+        start = time.monotonic()
+        assert _run(tmp_path, script, timeout_seconds=1.0) == TIMEOUT_EXIT_CODE
+        assert time.monotonic() - start < 15
+
+    def test_deadline_after_a_read_effect_is_124(self, tmp_path: Path) -> None:
+        script = _fake_vibe(
+            tmp_path, stdout_file=FIXTURES / "read-ok.events.jsonl", sleep_seconds=30
+        )
+        assert _run(tmp_path, script, timeout_seconds=1.0) == TIMEOUT_EXIT_CODE
+
+    def test_deadline_with_an_unreadable_stream_is_124(self, tmp_path: Path) -> None:
+        garbage = tmp_path / "garbage.out"
+        garbage.write_text("not json\n")
+        script = _fake_vibe(tmp_path, stdout_file=garbage, sleep_seconds=30)
+        assert _run(tmp_path, script, timeout_seconds=1.0) == TIMEOUT_EXIT_CODE
+
+    def test_deadline_through_a_fake_popen_terminates_the_group(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+
+        class _Process:
+            pid = 999_999
+            returncode = None
+
+            def communicate(self, input: str | None = None, timeout: float | None = None) -> None:
+                calls.append("communicate")
+                raise subprocess.TimeoutExpired(cmd="vibe", timeout=timeout or 0)
+
+        class _Lifeline:
+            def release(self) -> None:
+                calls.append("released")
+
+        monkeypatch.setattr(vibe, "spawn_watched", lambda command, **kw: (_Process(), _Lifeline()))
+        monkeypatch.setattr(
+            vibe, "terminate_process_group", lambda process: calls.append("terminated")
+        )
+        assert _run(tmp_path, tmp_path / "unused") == TIMEOUT_EXIT_CODE
+        assert calls == ["communicate", "terminated", "released"]
+
+    def test_deadline_in_a_writable_workspace_is_124(self, tmp_path: Path) -> None:
+        (tmp_path / "ws").mkdir()
+        workspace = Workspace(path=tmp_path / "ws", write=True)
+        script = _fake_vibe(tmp_path, sleep_seconds=30)
+        assert _run(tmp_path, script, timeout_seconds=1.0, workspace=workspace) == TIMEOUT_EXIT_CODE
+
+    def test_an_expired_caller_deadline_launches_nothing(self, tmp_path: Path) -> None:
+        record = tmp_path / "record"
+        script = _fake_vibe(tmp_path, record_dir=record)
+        assert _run(tmp_path, script, deadline=time.monotonic() - 1) == TIMEOUT_EXIT_CODE
+        assert not record.exists()
+
+    def test_a_missing_key_is_refused_with_2(self, tmp_path: Path) -> None:
+        record = tmp_path / "record"
+        script = _fake_vibe(tmp_path, record_dir=record)
+        env = {"PATH": KEY_ENV["PATH"], "HOME": str(tmp_path / "nohome")}
+        assert _run(tmp_path, script, environment=env) == INVALID_USAGE_EXIT_CODE
+        assert not record.exists()
+        assert "keys.toml" in (tmp_path / "logs" / "stderr.log").read_text()
+
+    def test_a_vibe_passthrough_is_refused_with_2(self, tmp_path: Path) -> None:
+        script = _fake_vibe(tmp_path)
+        profile = CapabilityProfile(environment_passthrough=("VIBE_ACTIVE_MODEL",))
+        assert _run(tmp_path, script, profile=profile) == INVALID_USAGE_EXIT_CODE
+
+    def test_an_invalid_model_is_refused_with_2(self, tmp_path: Path) -> None:
+        record = tmp_path / "record"
+        script = _fake_vibe(tmp_path, record_dir=record)
+        assert _run(tmp_path, script, model='x"\n[tools.bash]') == INVALID_USAGE_EXIT_CODE
+        assert not record.exists()
+
+    def test_mcp_profile_is_refused_with_2(self, tmp_path: Path) -> None:
+        script = _fake_vibe(tmp_path)
+        profile = CapabilityProfile(mcp=McpServer(name="brain", url="http://127.0.0.1:8765/mcp"))
+        assert _run(tmp_path, script, profile=profile) == INVALID_USAGE_EXIT_CODE
+        assert "MCP" in (tmp_path / "logs" / "stderr.log").read_text()
+
+    @pytest.mark.parametrize("name", ["api-error-invalid-key", "api-error-invalid-model"])
+    def test_an_api_error_before_any_effect_is_replayable(self, tmp_path: Path, name: str) -> None:
+        # Recorded by Task 0 M1: exit 1, stdout holds only the user message entry.
+        exit_codes = {"api-error-invalid-key": 1, "api-error-invalid-model": 1}
+        script = _fake_vibe(
+            tmp_path, stdout_file=FIXTURES / f"{name}.events.jsonl", exit_code=exit_codes[name]
+        )
+        assert _run(tmp_path, script) == PROVIDER_FALLBACK_EXIT_CODE
+
+    def test_a_missing_executable_is_replayable(self, tmp_path: Path) -> None:
+        assert _run(tmp_path, tmp_path / "absent-vibe") == PROVIDER_FALLBACK_EXIT_CODE
+
+    def test_the_home_is_refused_under_the_workspace(self, tmp_path: Path) -> None:
+        record = tmp_path / "record"
+        workspace = Workspace(path=tmp_path)
+        script = _fake_vibe(tmp_path, record_dir=record)
+        code = _run(tmp_path, script, workspace=workspace, ephemeral_root=tmp_path / "homes")
+        assert code == INVALID_USAGE_EXIT_CODE
+        assert not record.exists()
+        assert list((tmp_path / "homes").iterdir()) == []
+
+    def test_a_descendant_does_not_outlive_the_deadline(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "child.pid"
+        script = tmp_path / "bin" / "vibe"
+        script.parent.mkdir(parents=True)
+        script.write_text(
+            "#!/usr/bin/env bash\ncat > /dev/null\n"
+            f"sleep 60 & echo $! > {shlex.quote(str(pid_file))}\nwait\n"
+        )
+        script.chmod(0o755)
+        assert _run(tmp_path, script, timeout_seconds=1.0) == TIMEOUT_EXIT_CODE
+        child = int(pid_file.read_text())
+
+        def alive(pid: int) -> bool:
+            try:
+                state = Path(f"/proc/{pid}/stat").read_text().split(")")[-1].split()[0]
+            except OSError:
+                return False
+            # a zombie has stopped running
+            return state != "Z"
+
+        # terminate_process_group returns only once the group is gone or SIGKILLed:
+        # the descendant must already be stopped (gone, or a zombie) at return.
+        assert not alive(child), "a descendant of vibe survived run_vibe's return"
+
+    def test_an_interrupt_kills_the_group_and_releases_the_lifeline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        events: list[str] = []
+        group_checks: list[tuple[str, bool]] = []
+        spawned: list[subprocess.Popen[str]] = []
+        real_spawn = vibe.spawn_watched
+
+        class _Lifeline:
+            def __init__(self, inner: object) -> None:
+                self._inner = inner
+
+            def release(self) -> None:
+                events.append("released")
+                self._inner.release()  # type: ignore[attr-defined]
+
+        def spawn(command: list[str], **kwargs: object):  # type: ignore[no-untyped-def]
+            process, lifeline = real_spawn(command, **kwargs)
+            spawned.append(process)
+
+            def communicate(*args: object, **kw: object) -> None:
+                raise KeyboardInterrupt
+
+            monkeypatch.setattr(process, "communicate", communicate)
+            return process, _Lifeline(lifeline)
+
+        real_terminate = vibe.terminate_process_group
+
+        def _group_gone(pid: int) -> bool:
+            try:
+                os.killpg(pid, 0)
+            except ProcessLookupError:
+                return True
+            return False
+
+        def terminate(process: subprocess.Popen[str]) -> None:
+            # really kills the group
+            real_terminate(process)
+            group_checks.append(("group_gone", _group_gone(process.pid)))
+            events.append("terminated")
+
+        monkeypatch.setattr(vibe, "spawn_watched", spawn)
+        monkeypatch.setattr(vibe, "terminate_process_group", terminate)
+        script = _fake_vibe(tmp_path, sleep_seconds=30)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                _run(tmp_path, script)
+        finally:
+            for process in spawned:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+        assert group_checks == [("group_gone", True)]
+        assert events == ["terminated", "released"]
+
+
+class TestProvider:
+    def _spec(self, tmp_path: Path, script: Path, **overrides: object) -> RunSpec:
+        values: dict[str, object] = {
+            "prompt": "do it",
+            "name": "ha-test",
+            "model": "mistral-large-latest",
+            "profile": CapabilityProfile(),
+            "timeout_seconds": 30.0,
+            "max_turns": 50,
+            "run_dir": tmp_path / "run",
+            "executable": str(script),
+            "environment": KEY_ENV,
+        }
+        values.update(overrides)
+        return RunSpec(**values)  # type: ignore[arg-type]
+
+    def test_run_records_a_result_without_usage(self, tmp_path: Path) -> None:
+        (tmp_path / "homes").mkdir()
+        script = _fake_vibe(tmp_path, stdout_file=FIXTURES / "read-ok.events.jsonl")
+        provider = vibe.VibeProvider(ephemeral_root=tmp_path / "homes")
+        result = provider.run(self._spec(tmp_path, script))
+        assert result.exit_code == 0 and result.provider == "vibe"
+        assert result.model == "mistral-large-latest"
+        assert result.tokens is None and result.cost_usd is None and result.model_reported is None
+        assert result.text
+        assert (tmp_path / "run" / "result.json").is_file()
+
+    def test_build_command_previews_the_real_command(self, tmp_path: Path) -> None:
+        provider = vibe.VibeProvider(ephemeral_root=tmp_path / "homes")
+        command = provider.build_command(self._spec(tmp_path, Path("/opt/vibe")))
+        assert command[0] == "/opt/vibe" and command[-1] == "-p"
+        assert command[command.index("--workdir") + 1].endswith("/workdir")
+
+    def test_a_schema_is_refused(self, tmp_path: Path) -> None:
+        from headless_agents.structured import SchemaError
+
+        provider = vibe.VibeProvider(ephemeral_root=tmp_path / "homes")
+        spec = self._spec(tmp_path, Path("/opt/vibe"), output_schema={"type": "object"})
+        with pytest.raises(SchemaError):
+            provider.run(spec)
