@@ -946,7 +946,10 @@ def _run(args: argparse.Namespace, io: Io) -> int:
             io.stdout.write(text if text.endswith("\n") else text + "\n")
     elif outcome.final is not None:
         if isinstance(branch, str):
-            io.stdout.write(_write_header(outcome, branch))
+            # Spec 2026-10-13 usage §3.6: a budget stop prints nothing on stdout; a write's
+            # header (run, branch, diffstat, patch) still names its residue, on stderr.
+            stopped = outcome.exit_code == BUDGET_EXIT_CODE
+            (io.stderr if stopped else io.stdout).write(_write_header(outcome, branch))
         text = outcome.final.text
         if text:
             io.stdout.write(text if text.endswith("\n") else text + "\n")

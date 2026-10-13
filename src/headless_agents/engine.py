@@ -1248,8 +1248,12 @@ def _execute_write(
     say: Callable[[str], None],
     findings_head: str | None = None,
     admission_wait: locks.AdmissionWait | None = None,
+    ledger: Ledger | None = None,
 ) -> Outcome:
-    """A write run -- a role's, or an ``implement`` workflow's: §3.8.3, then its report."""
+    """A write run -- a role's, or an ``implement`` workflow's: §3.8.3, then its report.
+
+    A budget stop keeps today's handling of a failed step's residue; only its code and status
+    are its own (spec 2026-10-13 usage §3.6)."""
     role, run_dir = plan.role, entry.run_dir
     step_dir = run_dir / "steps" / step_name
     earlier: list[RunResult] = []
@@ -1265,6 +1269,7 @@ def _execute_write(
             say=say,
             slot=slot,
             attempts=earlier,
+            ledger=ledger,
         )
         say(f"step 1 {slot} {role.name}: exit {final.exit_code}")
         return final
@@ -1303,6 +1308,7 @@ def _execute_write(
                 effort=role.effort,
                 timeout_seconds=role.timeout,
                 attempts=earlier,
+                steps_after_crossing=_crossing(ledger, outcome.final),
             ),
         )
     failure_reason = outcome.failure_reason
@@ -1322,6 +1328,7 @@ def _execute_write(
         implement_providers=list(entry.providers),
         commits=[{"sha": sha, "made_by": made_by} for sha, made_by in outcome.commits],
         failure_reason=failure_reason,
+        budget=_budget(ledger),
         duration_seconds=round(time.monotonic() - started, 3),
     )
     write_report(run_dir, report)
@@ -1852,6 +1859,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
                     say=say,
                     findings_head=findings.head if findings is not None else None,
                     admission_wait=admission_wait,
+                    ledger=ledger,
                 ),
                 say,
             )
