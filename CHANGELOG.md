@@ -37,8 +37,27 @@ member rode a brain-v42 tag.
   links that ran before the final link), counted in the totals and in `cost_usd`.
 - One run summary line on stderr at the end of every `ha run` that starts; a `total` line
   in `ha show`.
+- Budget caps (spec `docs/specs/2026-10-13-usage-and-budget-design.md`, PR2, ticket
+  fe73f648): `ha run --max-cost USD` and `--max-input-tokens N`, and the `roles.toml` keys
+  `max_cost` and `max_input_tokens`. A cap on a link that cannot report usage during the
+  run (every rail but opencode) is refused before anything starts, exit `2`. A capped run
+  stops at the step that reaches its cap with the new exit code `7`
+  (`capability.BUDGET_EXIT_CODE`), status `budget_exhausted`, its partial answer kept apart;
+  a finish without the measure its cap needs stops it with exit `1`, reason
+  `budget_unmeasured`. `budget.Caps`, `budget.Ledger`, `RunSpec.budget`,
+  `registry.reports_usage_during_run`, `reports_cost`, `cap_refusal`;
+  `capability.kill_process_group`; `RunResult.partial_text`, `failure_reason` and
+  `usage_complete` (not in `result.json`).
+- `run.json`: the run key `budget`; the step keys `partial_answer`, `steps_after_crossing`,
+  `started`, `failure_reason` and `usage_complete`. `budget_exhausted` is a final status of
+  the registry and of lineages.
 
 ### Changed
+
+- A capped review runs its members one after another; an uncapped one keeps running them
+  concurrently. A step that never started is recorded with `exit_code: null` and
+  `started: false`, and leaves the run totals out of it. An opencode call killed in flight
+  makes the run totals incomplete (`tokens_complete`/`cost_complete` false), capped or not.
 
 - **breaking** for direct `run_claude` and `build_claude_command` callers: claude always
   runs with `--output-format json` (in the argv even without a schema). Without a schema

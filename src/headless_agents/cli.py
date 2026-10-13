@@ -101,6 +101,8 @@ exit codes of a run (a role or a provider):
   3 provider unavailable (a chain that runs out of links returns its last link's 3 or 4)
   4 timeout with no tool call started
   5 write run with no change
+  7 stopped at its budget cap (--max-cost, --max-input-tokens, a role's max_cost or
+    max_input_tokens): partial answer on stderr, never stdout; no fallback
   124 timeout
   130 interrupted (Ctrl-C); the run reads incomplete
 
@@ -108,6 +110,8 @@ exit codes of a workflow (implement, review):
   0 committed (implement), approved (review)
   6 changes requested (review)
   5 the implementation changed nothing (implement)
+  7 stopped at its budget cap: no later step, member or judge started; an implement
+    step's residue is committed and can be continued
   1 a step failed (its residue committed), the tripwire fired, HEAD moved, a hook
     refused, or the verdict is unreadable; the step's own code is in run.json
   2 invalid usage or configuration, a refused --run, --continue or --findings, a
