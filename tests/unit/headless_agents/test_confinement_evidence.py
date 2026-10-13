@@ -424,7 +424,7 @@ def test_an_agy_error_naming_another_cause_under_tool_info_error_proves_nothing(
 def test_no_log_is_no_evidence(tmp_path: Path) -> None:
     run = tmp_path / "run"
     run.mkdir()
-    for rail in ("claude", "opencode", "agy"):
+    for rail in ("claude", "opencode", "agy", "vibe"):
         assert refused_attempts(rail, run, _targets(tmp_path)) == set()
     # codex requires the probe line (see test_codex_evidence_without_the_probe_line_is_refused).
     assert refused_attempts("codex", run, _targets(tmp_path), line=LINE) == set()
