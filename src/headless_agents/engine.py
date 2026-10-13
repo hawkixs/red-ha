@@ -61,6 +61,7 @@ from .report import (
     refused_step_entry,
     step_dir_name,
     step_entry,
+    summary_line,
     with_step,
     write_report,
 )
@@ -856,6 +857,7 @@ def _run_links(
     say: Callable[[str], None],
     index: int = 1,
     slot: str = "run",
+    attempts: list[RunResult] | None = None,
 ) -> RunResult:
     """The 0.4.0 chain, unchanged: walk the role's links on 3 and 4 (§3.4)."""
     providers = plan.role.providers
@@ -882,6 +884,9 @@ def _run_links(
 
     outcome = run_chain(providers, run_one=run_one, on_fallback=on_fallback)
     final = results[outcome.provider]
+    if attempts is not None:
+        # Spec 2026-10-13 usage §3.2: every link that ran before the final one spent.
+        attempts.extend(result for name, result in results.items() if name != outcome.provider)
     if chained:
         source = link_dir(outcome.provider) / RESULT_FILE_NAME
         if source.is_file():
@@ -1150,6 +1155,7 @@ def _execute_write(
     """A write run -- a role's, or an ``implement`` workflow's: §3.8.3, then its report."""
     role, run_dir = plan.role, entry.run_dir
     step_dir = run_dir / "steps" / step_name
+    earlier: list[RunResult] = []
 
     def run_links(workspace: Workspace, directory: Path) -> RunResult:
         registry.set_started(entry.run_id, _utc_now())
@@ -1161,6 +1167,7 @@ def _execute_write(
             workspace=workspace,
             say=say,
             slot=slot,
+            attempts=earlier,
         )
         say(f"step 1 {slot} {role.name}: exit {final.exit_code}")
         return final
@@ -1198,6 +1205,7 @@ def _execute_write(
                 model_source=plan.model_sources[outcome.final.provider],
                 effort=role.effort,
                 timeout_seconds=role.timeout,
+                attempts=earlier,
             ),
         )
     failure_reason = outcome.failure_reason
@@ -1286,10 +1294,14 @@ def _run_phase(
         with said_lock:
             say(message)
 
+    attempts_of: dict[int, list[RunResult]] = {}
+
     live = procgroup.Collected()
 
     def run_one(step: tuple[int, SlotPlan, str]) -> RunResult:
         index, slot, prompt = step
+        earlier: list[RunResult] = []
+        attempts_of[index] = earlier
         name = step_dir_name(index, slot.slot, slot.role.name)
         with procgroup.collecting(live):
             final = _run_links(
@@ -1301,6 +1313,7 @@ def _run_phase(
                 say=said,
                 index=index,
                 slot=slot.slot,
+                attempts=earlier,
             )
         said(f"step {index} {slot.slot} {slot.role.name}: exit {final.exit_code}")
         return final
@@ -1331,6 +1344,7 @@ def _run_phase(
             model_source=slot.model_sources[result.provider],
             effort=slot.role.effort,
             timeout_seconds=slot.role.timeout,
+            attempts=attempts_of.get(index, []),
         )
         entry["verdict"] = read_verdict(result.text)
         entries.append(entry)
@@ -1482,6 +1496,12 @@ def _execute_review(
     return Outcome(
         exit_code=code, run_id=entry.run_id, run_dir=run_dir, report=report, final=deciding
     )
+
+
+def _summarised(outcome: Outcome, say: Callable[[str], None]) -> Outcome:
+    """Say the run summary line once, after all accounting (spec 2026-10-13 usage §3.3)."""
+    say(summary_line(outcome.report))
+    return outcome
 
 
 def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
@@ -1638,38 +1658,45 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
         write_report(run_dir, report)
         if plan.panel:
             assert identity is not None
-            return _execute_review(
-                plan,
-                registry=registry,
-                entry=entry,
-                identity=identity,
-                start=start,
-                report=report,
-                started=started,
-                say=say,
-                admission_wait=admission_wait,
+            return _summarised(
+                _execute_review(
+                    plan,
+                    registry=registry,
+                    entry=entry,
+                    identity=identity,
+                    start=start,
+                    report=report,
+                    started=started,
+                    say=say,
+                    admission_wait=admission_wait,
+                ),
+                say,
             )
         step_name = step_dir_name(1, slot, role.name)
         step_dir = run_dir / "steps" / step_name
         if role.write:
             assert identity is not None
-            return _execute_write(
-                plan,
-                bundle,
-                unconfined=unconfined,
-                registry=registry,
-                entry=entry,
-                identity=identity,
-                start=start,
-                report=report,
-                slot=slot,
-                step_name=step_name,
-                started=started,
-                say=say,
-                findings_head=findings.head if findings is not None else None,
-                admission_wait=admission_wait,
+            return _summarised(
+                _execute_write(
+                    plan,
+                    bundle,
+                    unconfined=unconfined,
+                    registry=registry,
+                    entry=entry,
+                    identity=identity,
+                    start=start,
+                    report=report,
+                    slot=slot,
+                    step_name=step_name,
+                    started=started,
+                    say=say,
+                    findings_head=findings.head if findings is not None else None,
+                    admission_wait=admission_wait,
+                ),
+                say,
             )
         registry.set_started(entry.run_id, _utc_now())
+        earlier: list[RunResult] = []
         final = _run_links(
             plan,
             bundle,
@@ -1677,6 +1704,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
             step_dir=step_dir,
             workspace=Workspace(path=repository),
             say=say,
+            attempts=earlier,
         )
         say(f"step 1 run {role.name}: exit {final.exit_code}")
         report = with_step(
@@ -1691,6 +1719,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
                 model_source=plan.model_sources[final.provider],
                 effort=role.effort,
                 timeout_seconds=role.timeout,
+                attempts=earlier,
             ),
         )
         exit_code, failure_reason = _schema_outcome(request, final, say)
@@ -1704,12 +1733,15 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
         )
         write_report(run_dir, report)
         registry.set_status(entry.run_id, status)
-        return Outcome(
-            exit_code=exit_code,
-            run_id=entry.run_id,
-            run_dir=run_dir,
-            report=report,
-            final=final,
+        return _summarised(
+            Outcome(
+                exit_code=exit_code,
+                run_id=entry.run_id,
+                run_dir=run_dir,
+                report=report,
+                final=final,
+            ),
+            say,
         )
 
 
