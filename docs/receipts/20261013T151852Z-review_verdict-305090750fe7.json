@@ -1,0 +1,70 @@
+{
+  "digest": "sha256:305090750fe785c37d65724bd38ab7865f425c6174862cfa7c605bc0d5d69f07",
+  "idempotency_key": "review_verdict:f0755243efb062eea910b585e328525bdde4682c:115377233932",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": false,
+      "carry_forwards": {
+        "addressed": [],
+        "deferred": [
+          "CF-4-3"
+        ]
+      },
+      "check_run_id": 115377233932,
+      "diff_truncated": false,
+      "finding_count": 3,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "The description states the project line of uv.lock is updated to 0.5.5 and the test plan claims `uv lock --check` passes, but the visible diff contains no uv.lock hunk (only pyproject.toml, CHANGELOG.md, CLAUDE.md, README.md and the new receipt appear). Question to check: does uv.lock at the head re",
+          "file": "uv.lock",
+          "id": "F-14-1",
+          "line": null,
+          "severity": "important",
+          "status": "still_open",
+          "title": "Claimed uv.lock version bump not visible in the diff"
+        },
+        {
+          "class": "note",
+          "evidence": "payload.data.findings[0].evidence ends with '...and only matt', an apparent truncation of the recorded #13 finding text. Cosmetic only: the receipt's structure, digest/filename agreement, and timestamp are otherwise well formed.",
+          "file": "docs/receipts/20261013T150714Z-review_verdict-791d75ec341a.json",
+          "id": "F-14-2",
+          "line": 22,
+          "severity": "minor",
+          "status": "still_open",
+          "title": "Recorded finding evidence truncated mid-word"
+        },
+        {
+          "class": "note",
+          "evidence": "The delta adds a Changed bullet (new lines 65-69) claiming `build_codex_command` refuses (exit 2) argv that sets model_provider/model_providers.* via -c/--config, --profile/-p, --oss/--local-provider, 'whether the value is a separate token or attached' (--profile=work, -p=work, -pwork), and a '### T",
+          "file": "CHANGELOG.md",
+          "id": "F-14-3",
+          "line": 65,
+          "severity": "minor",
+          "status": "new",
+          "title": "New changelog entries describe behavior and files outside this delta"
+        }
+      ],
+      "independent": true,
+      "mode": "incremental",
+      "not_reviewed": [],
+      "pr": 14,
+      "providers": [
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 2,
+      "sha": "f0755243efb062eea910b585e328525bdde4682c",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T15:18:52.347602Z",
+  "schema_version": 1
+}
