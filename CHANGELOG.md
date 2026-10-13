@@ -17,7 +17,7 @@ From 0.5.4 on, each version is tagged `vX.Y.Z` on the red-ha repository, on the 
 ships it. Pin it:
 
 ```sh
-uv add "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.4"
+uv add "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.5.5"
 ```
 
 Up to 0.5.3, versions were tagged on the brain-v42 repository as `headless-agents-vX.Y.Z`,
@@ -25,7 +25,7 @@ deliberately outside the `v*` pattern that names brain-v42's own version; those 
 valid. The earlier `v0.6.0` tag (2026-09-14) also carries 0.1.0; it is the last time the
 member rode a brain-v42 tag.
 
-## Unreleased
+## 0.5.5 — 2026-10-13 (tag `v0.5.5` after merge)
 
 ### Added
 
