@@ -506,12 +506,15 @@ def _valid_check() -> VendorCheck:
 INVALID_MUTATIONS = [
     lambda d: d.update(authors=["openai"]),
     lambda d: d["commits"][0]["links"][0].pop("vendor"),
-    lambda d: d["commits"][0]["links"][0].update(vendor="unknown"),
+    # Authors follow the mutation, so only the unknown-author clause can refuse it.
+    lambda d: (d["commits"][0]["links"][0].update(vendor="unknown"), d.update(authors=["unknown"])),
     lambda d: d["panel"][0]["links"][0].update(vendor="unknown"),
     lambda d: d["panel"][0]["links"][0].update(vendor="anthropic"),
     lambda d: d.update(panel=[]),
     lambda d: d["panel"][0].update(links=[]),
-    lambda d: d["commits"][0].update(links=[]),
+    # A non-hand commit without links, its providers and authors emptied to match: refused
+    # (an engine commit with no provider is no attribution ha makes, whatever its links).
+    lambda d: (d["commits"][0].update(links=[], providers=[]), d.update(authors=[])),
     lambda d: d["commits"][0].update(providers=["opencode"]),
 ]
 INVALID_IDS = [
@@ -525,6 +528,39 @@ INVALID_IDS = [
     "empty-engine-links",
     "providers-mismatch",
 ]
+
+
+def test_the_model_vendor_document_shape_is_pinned() -> None:
+    assert _valid_check().to_document() == {
+        "rule": "model-vendor",
+        "table_digest": TABLE.digest,
+        "authors": ["anthropic"],
+        "commits": [
+            {
+                "sha": SHA_1,
+                "run_id": RUN,
+                "made_by": "engine",
+                "providers": ["claude"],
+                "links": [
+                    {
+                        "provider": "claude",
+                        "model": "claude-x",
+                        "switches": [],
+                        "vendor": "anthropic",
+                    }
+                ],
+            }
+        ],
+        "panel": [
+            {
+                "slot": "review",
+                "role": "r",
+                "links": [
+                    {"provider": "codex", "model": "gpt-6", "switches": [], "vendor": "openai"}
+                ],
+            }
+        ],
+    }
 
 
 @pytest.mark.parametrize("mutate", INVALID_MUTATIONS, ids=INVALID_IDS)

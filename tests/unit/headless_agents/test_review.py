@@ -1258,13 +1258,18 @@ def test_a_vibe_author_and_mistral_judge_refuse_before_any_reviewer(world: World
 
 
 @pytest.mark.parametrize(
-    ("target", "variable"),
-    [("check", "ANTHROPIC_BASE_URL"), ("panel", "OPENAI_BASE_URL")],
+    ("target", "variable", "who"),
+    [
+        ("check", "ANTHROPIC_BASE_URL", r"review \S+ runs claude"),
+        # The judge is the panel's only codex member: the refusal must name it (spec D5).
+        ("panel", "OPENAI_BASE_URL", r"judge judge runs codex"),
+    ],
 )
 def test_backend_switches_refuse_admission_before_any_member(
     world: World,
     target: str,
     variable: str,
+    who: str,
 ) -> None:
     world.commit_by_hand()
     if variable == "OPENAI_BASE_URL":
@@ -1275,7 +1280,7 @@ def test_backend_switches_refuse_admission_before_any_member(
     request = world.request(target, None)
     environ = {**request.environ, variable: "https://backend.example.test"}
     assert variable in engine.operator_environment(environ)
-    with pytest.raises(UsageError, match=variable):
+    with pytest.raises(UsageError, match=rf"{who}.*{variable}"):
         world.review(target, environ=environ)
     assert all(not agent.specs for agent in world.agents.values())
 
