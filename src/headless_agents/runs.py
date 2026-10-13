@@ -24,8 +24,10 @@ from .registry import PROVIDER_NAMES
 from .state import Unknown, create_once, publish, read
 
 RUN_ID_PATTERN: Final = re.compile(r"\d{8}T\d{6}-[0-9a-f]{8}")
+#: ``budget_exhausted``: the run stopped at its budget cap, exit 7 (spec 2026-10-13
+#: usage and budget §3.6), in the registry and in a lineage alike.
 FINAL_STATUSES: Final = frozenset(
-    {"answered", "failed", "committed", "no_change", "approved", "changes"}
+    {"answered", "failed", "committed", "no_change", "approved", "changes", "budget_exhausted"}
 )
 #: What ``ha`` stores as a run's status, in its entry or in its lineage: ``running``,
 #: or a final status. ``incomplete`` is derived from the lifecycle lock, never stored.

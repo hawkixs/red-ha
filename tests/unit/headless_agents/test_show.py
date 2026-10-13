@@ -1003,3 +1003,114 @@ def test_incomplete_tokens_are_marked(home: Home) -> None:
 def test_a_report_without_run_totals_prints_no_total_line(home: Home) -> None:
     rendered = show.render(_shown(home.report())).splitlines()
     assert not any(line.startswith("total") for line in rendered)
+
+
+# ── budget (spec 2026-10-13 usage and budget §3.6) ──────────────────────────
+
+_BUDGET = {
+    "max_cost": None,
+    "max_input_tokens": 1000,
+    "spent_cost": 0.0042,
+    "spent_input_tokens": 1500,
+    "spent_complete": True,
+    "overshoot_cost": None,
+    "overshoot_input_tokens": 500,
+}
+
+
+def _stopped_step(**fields: object) -> dict[str, object]:
+    step = dict(
+        _STEP,
+        provider="opencode",
+        model="opencode-go/glm-5.3-flash",
+        exit_code=7,
+        tokens={"input": 1500, "output": 40, "fresh": 300, "cached": 1200, "thinking": 0},
+        cost_usd=0.0042,
+        tools={"read": 3},
+        attempts=[],
+        partial_answer="The first half of the review.\n",
+        steps_after_crossing=0,
+        started=True,
+        failure_reason="budget_exhausted",
+        usage_complete=True,
+    )
+    step.update(fields)
+    return step
+
+
+GOLDEN_BUDGET = """\
+20260925T120000-ab12cd34  codex  exit 7  budget exhausted (budget_exhausted)
+task    Explain what this repository does.
+  run  codex  opencode  opencode-go/glm-5.3-flash  7  1m05s  in 1k out 40  $0.00  read 3
+total   in 1k out 40  $0.00
+budget  input 1.5k of 1.0k (overshoot 500)
+step    run codex: budget_exhausted
+--- run codex: partial answer (budget exhausted, not an answer) ---
+The first half of the review.
+"""
+
+
+def test_a_run_stopped_on_its_budget_renders_as_the_golden_text(home: Home) -> None:
+    report = home.report(
+        status="budget_exhausted",
+        exit_code=7,
+        failure_reason="budget_exhausted",
+        text=None,
+        steps=[_stopped_step()],
+        tokens={"input": 1500, "output": 40, "fresh": 300, "cached": 1200, "thinking": 0},
+        tokens_complete=True,
+        cost_usd=0.0042,
+        cost_complete=True,
+        budget=_BUDGET,
+    )
+    rendered = show.render(_shown(report, task="Explain what this repository does."))
+    assert rendered == GOLDEN_BUDGET
+
+
+def test_an_incomplete_spend_reads_at_least_with_unknown_overshoot(home: Home) -> None:
+    budget = dict(_BUDGET, spent_complete=False, overshoot_input_tokens=None)
+    report = home.report(
+        status="budget_exhausted",
+        exit_code=7,
+        steps=[_stopped_step(usage_complete=False)],
+        tokens={"input": 1500, "output": 40},
+        tokens_complete=False,
+        budget=budget,
+    )
+    lines = show.render(_shown(report)).splitlines()
+    assert "budget  input ≥ 1.5k of 1.0k (incomplete, overshoot unknown)" in lines
+    assert "total   in 1k out 40 (incomplete)  $0.03" in lines
+
+
+def test_every_partial_is_labelled_and_a_skipped_step_says_why(home: Home) -> None:
+    """A review panel: its first member crossed, the second and the judge never started."""
+    skipped = dict.fromkeys(_stopped_step())
+    skipped.update(slot="review", role="oc-b", index=2, attempts=[], started=False)
+    skipped["failure_reason"] = "budget_exhausted"
+    judge = dict(skipped, slot="judge", role="oc-judge", index=3)
+    report = home.report(
+        status="budget_exhausted",
+        exit_code=7,
+        text=None,
+        steps=[_stopped_step(slot="review", role="oc-a"), skipped, judge],
+        budget=_BUDGET,
+    )
+    lines = show.render(_shown(report)).splitlines()
+    (judge_row,) = [line for line in lines if line.lstrip().startswith("judge ")]
+    assert judge_row.split() == ["judge", "oc-judge", "-", "-", "-", "-", "-", "-", "-"]
+    assert "step    review oc-b: not started, budget_exhausted" in lines
+    assert "step    judge oc-judge: not started, budget_exhausted" in lines
+    assert "--- review oc-a: partial answer (budget exhausted, not an answer) ---" in lines
+    assert not any(line.startswith("--- run") for line in lines), "no answer block"
+
+
+def test_ha_show_derives_a_budget_stop_from_the_registry(home: Home) -> None:
+    home.read_only(entry_status="budget_exhausted", status="budget_exhausted", exit_code=7)
+    shown = home.rebuild()
+    assert shown.report["status"] == "budget_exhausted" and not shown.unknown
+
+
+def test_ha_show_reads_a_lineage_member_stopped_on_its_budget(home: Home) -> None:
+    home.write_run(member="budget_exhausted", status="budget_exhausted", exit_code=7)
+    shown = home.rebuild()
+    assert shown.report["status"] == "budget_exhausted" and not shown.unknown
