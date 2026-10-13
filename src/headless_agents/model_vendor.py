@@ -116,17 +116,32 @@ def backend_switches(provider: str, environment: Mapping[str, str]) -> tuple[str
     return tuple(sorted(ENV_SWITCHES.get(provider, frozenset()) & environment.keys()))
 
 
+def _flag(arg: str) -> tuple[str, str | None]:
+    """``arg`` split into its option and an attached value, as clap reads it:
+    ``--flag=value``, ``-f=value`` and ``-fvalue``; ``(arg, None)`` for anything else."""
+    if arg.startswith("--"):
+        name, sep, value = arg.partition("=")
+        return (name, value) if sep else (arg, None)
+    if arg.startswith("-") and len(arg) > 2:
+        value = arg[2:]
+        return arg[:2], value[1:] if value.startswith("=") else value
+    return arg, None
+
+
 def codex_argv_switches(argv: Sequence[str]) -> tuple[str, ...]:
-    """The backend switches a codex argv carries (spec D2bis)."""
+    """The backend switches a codex argv carries (spec D2bis, amendment A1), whether a
+    value follows the option or is attached to it."""
     found: set[str] = set()
     for index, arg in enumerate(argv):
-        if arg in _CODEX_FLAGS:
-            found.add(_CODEX_FLAGS[arg])
+        option, attached = _flag(arg)
+        if option in _CODEX_FLAGS:
+            found.add(_CODEX_FLAGS[option])
         config_value = None
-        if arg in {"-c", "--config"} and index + 1 < len(argv):
-            config_value = argv[index + 1]
-        elif arg.startswith(("-c=", "--config=")):
-            config_value = arg.split("=", 1)[1]
+        if option in {"-c", "--config"}:
+            if attached is not None:
+                config_value = attached
+            elif index + 1 < len(argv):
+                config_value = argv[index + 1]
         if config_value is not None:
             key = config_value.split("=", 1)[0].strip()
             if key == "model_provider":
