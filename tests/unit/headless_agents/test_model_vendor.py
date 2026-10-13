@@ -162,6 +162,14 @@ def test_backend_switches_are_named_by_presence() -> None:
         (["codex", "exec", "--oss"], ("--oss",)),
         (["codex", "exec", "--local-provider", "ollama"], ("--local-provider",)),
         (["codex", "exec", "-c", "features.web_search=false"], ()),
+        # Attached values (clap accepts "--flag=value", "-f=value" and "-fvalue").
+        (["codex", "exec", "--profile=work"], ("--profile",)),
+        (["codex", "exec", "-p=work"], ("--profile",)),
+        (["codex", "exec", "-pwork"], ("--profile",)),
+        (["codex", "exec", "--local-provider=ollama"], ("--local-provider",)),
+        (["codex", "exec", "--oss=true"], ("--oss",)),
+        (["codex", "exec", '-cmodel_provider="oss"'], ("model_provider",)),
+        (["codex", "exec", "-C", "/w", "--model", "gpt-6"], ()),
     ],
 )
 def test_codex_argv_switches(argv: list[str], named: tuple[str, ...]) -> None:
