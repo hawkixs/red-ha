@@ -1,0 +1,61 @@
+{
+  "digest": "sha256:f201b701b8db88828dbbe251e2a8abc4d6c42e5a44afd2033a5c6c8ca54e36ea",
+  "idempotency_key": "review_verdict:caef57995cfa54c6ee6564cf35cc3c78d95ff9ea:115321319340",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "spec_plan",
+      "blocking": false,
+      "check_run_id": 115321319340,
+      "diff_truncated": false,
+      "finding_count": 3,
+      "findings": [
+        {
+          "class": "carry_forward",
+          "evidence": "The plan asserts an unreadable or malformed operator vendors.toml is 'refused (exit 2) naming the file' and Task 4 maps VendorTableError to UsageError at planning. Whether UsageError exits 2 is a property of the existing CLI error handling, which is outside the diff; the implementation test in Task ",
+          "file": "docs/plans/2026-10-13-model-vendor-rule.md",
+          "id": "F-11-1",
+          "line": 42,
+          "severity": "minor",
+          "status": "new",
+          "title": "Exit-2 behavior on vendor-table load errors depends on code outside the diff"
+        },
+        {
+          "class": "note",
+          "evidence": "shipped_table() reads and parses vendors.toml each invocation and load_table() calls it again; digest and resolution tests pass either way, but hot paths (per-slot resolution during admission) pay repeated I/O. A module-level cache or loading once per plan (as Task 4 already does for Plan.vendor_tab",
+          "file": "docs/plans/2026-10-13-model-vendor-rule.md",
+          "id": "F-11-2",
+          "line": 705,
+          "severity": "minor",
+          "status": "new",
+          "title": "shipped_table() re-reads and re-parses the TOML on every call"
+        },
+        {
+          "class": "note",
+          "evidence": "@dataclass(frozen=True) with Mapping fields: the dataclass prevents attribute rebinding but the underlying dicts from tomllib are mutable, so a caller could mutate providers/orgs in place and desynchronize the digest. Internal use only in the plan; consider MappingProxyType or documenting the invari",
+          "file": "docs/plans/2026-10-13-model-vendor-rule.md",
+          "id": "F-11-3",
+          "line": 98,
+          "severity": "minor",
+          "status": "new",
+          "title": "VendorTable declared frozen but holds mutable dict fields"
+        }
+      ],
+      "independent": true,
+      "mode": "light",
+      "pr": 11,
+      "providers": [
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "caef57995cfa54c6ee6564cf35cc3c78d95ff9ea",
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T13:25:28.034775Z",
+  "schema_version": 1
+}
