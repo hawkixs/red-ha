@@ -20,7 +20,7 @@ from typing import Final
 from .runs import RUN_ID_PATTERN
 from .state import Unknown, create_once, read, read_optional
 from .templates import Verdict
-from .vendor import VendorCheck
+from .vendor import AnyVendorCheck, check_from_document
 
 REVIEWS_DIR: Final = "reviews"
 VERDICTS: Final = ("approve", "changes")
@@ -35,7 +35,7 @@ class ReviewResult:
     verdict: Verdict
     #: The deciding text: the judge's, or the only reviewer's.
     text: str
-    check: VendorCheck
+    check: AnyVendorCheck
 
 
 def _checked(run_id: str) -> str:
@@ -52,12 +52,12 @@ def result_path(state: Path, run_id: str) -> Path:
     return state / REVIEWS_DIR / f"{_checked(run_id)}.json"
 
 
-def write_check(state: Path, run_id: str, check: VendorCheck) -> None:
+def write_check(state: Path, run_id: str, check: AnyVendorCheck) -> None:
     """Write the check once; :class:`FileExistsError` if it exists."""
     create_once(check_path(state, run_id), {"run_id": run_id, "vendor_check": check.to_document()})
 
 
-def load_check(state: Path, run_id: str) -> VendorCheck | None:
+def load_check(state: Path, run_id: str) -> AnyVendorCheck | None:
     """The check; ``None`` when none was written (a review refused before it)."""
     path = check_path(state, run_id)
     document = read_optional(path, expect_id=("run_id", run_id))
@@ -66,11 +66,11 @@ def load_check(state: Path, run_id: str) -> VendorCheck | None:
     raw = document.get("vendor_check")
     if not isinstance(raw, dict):
         raise Unknown(f"{path}: vendor_check is malformed")
-    return VendorCheck.from_document(raw, where=str(path))
+    return check_from_document(raw, where=str(path))
 
 
 def write_result(
-    state: Path, run_id: str, *, head: str, verdict: Verdict, text: str, check: VendorCheck
+    state: Path, run_id: str, *, head: str, verdict: Verdict, text: str, check: AnyVendorCheck
 ) -> None:
     """Write the result once, before the cleanup (§3.8.4 step 6); :class:`FileExistsError`."""
     create_once(
@@ -108,7 +108,7 @@ def load_result(state: Path, run_id: str) -> ReviewResult:
         head=head,
         verdict="approve" if verdict == "approve" else "changes",
         text=text,
-        check=VendorCheck.from_document(raw, where=str(path)),
+        check=check_from_document(raw, where=str(path)),
     )
 
 

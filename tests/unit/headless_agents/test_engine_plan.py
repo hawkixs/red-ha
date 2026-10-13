@@ -21,6 +21,7 @@ from headless_agents.engine import (
     Request,
     UsageError,
     _spec_for,
+    panel_members,
     plan,
 )
 from headless_agents.registry import max_prompt_bytes
@@ -575,3 +576,45 @@ def test_a_schema_codex_strict_mode_rejects_is_refused_before_any_run(
     with pytest.raises(UsageError, match=r"^codex cannot constrain"):
         plan(env.request("codex", "task", output_schema=NON_STRICT))
     assert plan(env.request("claude", "task", output_schema=NON_STRICT)).request.output_schema
+
+
+def test_review_plans_pin_a_vendor_table_and_role_runs_do_not(env: Env) -> None:
+    _panel(env)
+    assert plan(env.request("panel", None)).vendor_table is not None
+    assert plan(env.request("reviewer", "task")).vendor_table is None
+
+
+def test_panel_members_use_frozen_models_for_links_roles_and_defaults(env: Env) -> None:
+    env.roles(
+        '[chain]\nchain = ["opencode:opencode-go/deepseek-v4-pro", "agy"]\n\n'
+        '[role-model]\nprovider = "claude"\nmodel = "claude-role"\n\n'
+        '[judge]\nprovider = "codex"\n'
+    )
+    (env.config / "models.toml").write_text('agy = "gemini-default"\ncodex = "codex-default"\n')
+    (env.config / "workflows.toml").write_text(
+        '[panel]\nshape = "review"\nreview = ["chain", "role-model"]\njudge = "judge"\n'
+    )
+    planned = plan(env.request("panel", None))
+    members = panel_members(planned)
+    assert [(member.slot, member.role) for member in members] == [
+        ("review", "chain"),
+        ("review", "role-model"),
+        ("judge", "judge"),
+    ]
+    assert [[(link.provider, link.model) for link in member.links] for member in members] == [
+        [("opencode", "opencode-go/deepseek-v4-pro"), ("agy", "gemini-default")],
+        [("claude", "claude-role")],
+        [("codex", "codex-default")],
+    ]
+    assert [[link.model for link in member.links] for member in members] == [
+        [slot.models[link.provider] for link in slot.role.links] for slot in planned.panel
+    ]
+    (env.config / "models.toml").write_text('agy = "gemini-changed"\ncodex = "codex-changed"\n')
+    assert panel_members(planned) == members
+
+
+def test_a_non_toml_operator_vendor_table_refuses_review_planning(env: Env) -> None:
+    _panel(env)
+    (env.config / "vendors.toml").write_text("not = [toml")
+    with pytest.raises(UsageError, match=r"vendors\.toml"):
+        plan(env.request("panel", None))

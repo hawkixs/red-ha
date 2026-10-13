@@ -4,17 +4,26 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from headless_agents import reviews
+from headless_agents.model_vendor import LinkRecord, shipped_table
 from headless_agents.state import Unknown
-from headless_agents.vendor import AttributedCommit, VendorCheck
+from headless_agents.vendor import (
+    AttributedCommit,
+    LegacyVendorCheck,
+    PanelMember,
+    check_from_document,
+    check_independence,
+)
 
 RUN = "20260926T120000-cccccccc"
 HEAD = "a" * 40
-CHECK = VendorCheck(
+CHECK = LegacyVendorCheck(
     commits=(AttributedCommit(sha="1" * 40, run_id=None, made_by="hand", providers=()),),
     authors=(),
     reviewers={"reviewer-codex": ("codex",)},
@@ -80,3 +89,74 @@ def test_the_records_live_under_reviews(tmp_path: Path) -> None:
 def test_a_malformed_run_id_is_a_programming_error(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="run id"):
         reviews.result_path(tmp_path, "../x")
+
+
+VALID_CHECK = check_independence(
+    (
+        AttributedCommit(
+            "1" * 40, RUN, "engine", ("claude",), (LinkRecord("claude", "claude-x", ()),)
+        ),
+    ),
+    (PanelMember("review", "r", (LinkRecord("codex", "gpt-6", ()),)),),
+    shipped_table(),
+)
+
+
+INVALID_MUTATIONS = [
+    lambda d: d.update(authors=["openai"]),
+    lambda d: d["commits"][0]["links"][0].pop("vendor"),
+    # Authors follow the mutation, so only the unknown-author clause can refuse it.
+    lambda d: (d["commits"][0]["links"][0].update(vendor="unknown"), d.update(authors=["unknown"])),
+    lambda d: d["panel"][0]["links"][0].update(vendor="unknown"),
+    lambda d: d["panel"][0]["links"][0].update(vendor="anthropic"),
+    lambda d: d.update(panel=[]),
+    lambda d: d["panel"][0].update(links=[]),
+    # A non-hand commit without links, its providers and authors emptied to match: refused
+    # (an engine commit with no provider is no attribution ha makes, whatever its links).
+    lambda d: (d["commits"][0].update(links=[], providers=[]), d.update(authors=[])),
+    lambda d: d["commits"][0].update(providers=["opencode"]),
+]
+INVALID_IDS = [
+    "authors-mismatch",
+    "missing-vendor",
+    "unknown-author",
+    "unknown-panel",
+    "panel-shares-author",
+    "empty-panel",
+    "empty-member-links",
+    "empty-engine-links",
+    "providers-mismatch",
+]
+
+
+@pytest.mark.parametrize("mutate", INVALID_MUTATIONS, ids=INVALID_IDS)
+def test_an_invalid_new_shape_check_is_refused_by_both_readers(
+    tmp_path: Path, mutate: Callable[[dict[str, Any]], object]
+) -> None:
+    document = VALID_CHECK.to_document()
+    mutate(document)
+    with pytest.raises(Unknown):
+        check_from_document(document, where="t")
+    reviews.write_result(tmp_path, RUN, head=HEAD, verdict="approve", text="ok", check=VALID_CHECK)
+    path = reviews.result_path(tmp_path, RUN)
+    stored = json.loads(path.read_text())
+    stored["vendor_check"] = document
+    path.chmod(0o600)
+    path.write_text(json.dumps(stored))
+    with pytest.raises(Unknown):
+        reviews.load_result(tmp_path, RUN)
+    reviews.write_check(tmp_path, RUN, VALID_CHECK)
+    path = reviews.check_path(tmp_path, RUN)
+    stored = json.loads(path.read_text())
+    stored["vendor_check"] = document
+    path.chmod(0o600)
+    path.write_text(json.dumps(stored))
+    with pytest.raises(Unknown):
+        reviews.load_check(tmp_path, RUN)
+
+
+def test_a_new_shape_check_and_result_round_trip(tmp_path: Path) -> None:
+    reviews.write_check(tmp_path, RUN, VALID_CHECK)
+    reviews.write_result(tmp_path, RUN, head=HEAD, verdict="approve", text="ok", check=VALID_CHECK)
+    assert reviews.load_check(tmp_path, RUN) == VALID_CHECK
+    assert reviews.load_result(tmp_path, RUN).check == VALID_CHECK

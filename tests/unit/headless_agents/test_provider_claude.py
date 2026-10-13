@@ -17,6 +17,8 @@ from headless_agents.capability import (
     TIMEOUT_REPLAYABLE_EXIT_CODE,
 )
 from headless_agents.context import resolve_context
+from headless_agents.engine import operator_environment
+from headless_agents.model_vendor import backend_switches
 from headless_agents.profile import CapabilityProfile, McpServer, Workspace
 from headless_agents.providers import claude
 from headless_agents.spec import RunSpec
@@ -26,6 +28,28 @@ URL = "http://127.0.0.1:8765/mcp"
 
 _OAUTH = {"accessToken": "at-1", "refreshToken": "rt-1", "expiresAt": 1}
 _MCP_OAUTH = {"Gmail|x": {"accessToken": "gmail-secret"}}
+
+
+def test_the_production_child_environment_carries_only_real_switches(tmp_path: Path) -> None:
+    clean = operator_environment({"PATH": "/bin", "HOME": "/h", "CLAUDE_CODE_USE_BEDROCK": "1"})
+    spec = RunSpec(
+        prompt="P",
+        model="m",
+        environment=clean,
+        extra={"mcp_config_path": tmp_path / "mcp.json"},
+    )
+    env = claude.ClaudeProvider().child_environment(spec, {})
+    assert env is not None and backend_switches("claude", env) == ()
+    assert "CLAUDE_CODE_USE_BEDROCK" not in env
+    claude.ClaudeProvider().build_command(spec)
+    switched = RunSpec(
+        prompt="P",
+        model="m",
+        environment=operator_environment({"PATH": "/bin", "ANTHROPIC_BASE_URL": "http://x"}),
+        extra={"mcp_config_path": tmp_path / "mcp.json"},
+    )
+    env = claude.ClaudeProvider().child_environment(switched, {})
+    assert env is not None and backend_switches("claude", env) == ("ANTHROPIC_BASE_URL",)
 
 
 def _write_credentials(config_dir: Path, **overrides: object) -> Path:

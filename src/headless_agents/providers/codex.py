@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 import time
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Final
@@ -35,6 +35,7 @@ from ..capability import (
     terminate_process_group,
 )
 from ..event_log import read_events
+from ..model_vendor import codex_argv_switches
 from ..procgroup import preexec_for, spawn_watched
 from ..profile import McpServer, Workspace
 from ..result import RunResult
@@ -63,6 +64,14 @@ CHILD_ENV_PASSTHROUGH = frozenset({"CODEX_HOME"})
 #: The file a schema-constrained run hands ``--output-schema``, inside its own
 #: run-owned ``CODEX_HOME`` (see :func:`run_codex`).
 OUTPUT_SCHEMA_NAME: Final = "output-schema.json"
+
+
+def refuse_argv_switches(argv: Sequence[str]) -> None:
+    """Refuse an argv that could point codex at another backend (spec amendment A1)."""
+    switches = codex_argv_switches(argv)
+    if switches:
+        raise ValueError(f"codex argv carries a backend switch: {', '.join(switches)}")
+
 
 _DISABLED_FEATURES = (
     "apps",
@@ -250,6 +259,7 @@ def build_codex_command(
     if output_schema is not None:
         command.extend(("--output-schema", str(output_schema)))
     command.extend(("--output-last-message", str(report_log), "-"))
+    refuse_argv_switches(command)
     return command
 
 

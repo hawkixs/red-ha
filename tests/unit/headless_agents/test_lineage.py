@@ -10,6 +10,7 @@ import pytest
 
 from headless_agents import lineage, provenance
 from headless_agents.lineage import LineageState, PendingWrite
+from headless_agents.model_vendor import LinkRecord
 from headless_agents.state import Missing, Unknown
 
 _OWNER = "20260925T000000-aaaaaaaa"
@@ -160,7 +161,13 @@ def test_of_repository_without_lineages_is_empty(tmp_path: Path) -> None:
 def test_a_provenance_record_is_written_once(tmp_path: Path) -> None:
     sha = "a" * 40
     provenance.record(
-        tmp_path, sha, run_id=_OWNER, lineage=_OWNER, made_by="engine", providers=["codex"]
+        tmp_path,
+        sha,
+        run_id=_OWNER,
+        lineage=_OWNER,
+        made_by="engine",
+        providers=["codex"],
+        links=(LinkRecord("codex", "", ()),),
     )
     assert provenance.lookup(tmp_path, sha) == {
         "sha": sha,
@@ -168,10 +175,11 @@ def test_a_provenance_record_is_written_once(tmp_path: Path) -> None:
         "lineage": _OWNER,
         "made_by": "engine",
         "providers": ["codex"],
+        "links": [{"provider": "codex", "model": "", "switches": []}],
     }
     with pytest.raises(FileExistsError):
         provenance.record(
-            tmp_path, sha, run_id=_OWNER, lineage=_OWNER, made_by="agent", providers=[]
+            tmp_path, sha, run_id=_OWNER, lineage=_OWNER, made_by="agent", providers=[], links=()
         )
     assert provenance.lookup(tmp_path, "b" * 40) is None
 
@@ -179,7 +187,13 @@ def test_a_provenance_record_is_written_once(tmp_path: Path) -> None:
 def test_provenance_refuses_what_is_not_a_sha(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not a commit sha"):
         provenance.record(
-            tmp_path, "../x", run_id=_OWNER, lineage=_OWNER, made_by="engine", providers=[]
+            tmp_path,
+            "../x",
+            run_id=_OWNER,
+            lineage=_OWNER,
+            made_by="engine",
+            providers=[],
+            links=(),
         )
 
 

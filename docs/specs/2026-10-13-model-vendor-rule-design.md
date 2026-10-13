@@ -275,3 +275,20 @@ recorded in links and checked at admission, `backend_switches(provider, environm
 reads the effective child environment only. `claude`'s argv has no backend flag ha could
 pass, so it has no argv check.
 
+
+### A2 — legacy unconfined writers get a dedicated refusal (final branch review)
+
+D4 called the refusal of records without links short lived because a review range moves
+on. That holds for provenance records, not for the unconfined-writers list: it is global
+to the state directory and ha never clears it (§3.8.4), so one legacy writer without
+`links` makes every commit without provenance (hand-written ones included, in any
+repository) unattributable for good. Measured on the operator's machine at the time: 18
+writers, none with `links`.
+
+Decision (coordination, 2026-10-13): stay fail closed. A commit whose attribution falls
+on unconfined writers lacking `links` is refused with a dedicated message that names
+`unconfined-writers.json`, counts the legacy writers, and gives the recovery: archive the
+list (rename it, e.g. `unconfined-writers.legacy-<date>.json`; nothing is deleted), after
+which ha starts a new list. Archiving gives up the protection against those legacy
+unconfined writes, so it is an operator or coordination decision, never done by ha. The
+README and the changelog say that the refusal lasts until the list is archived.
