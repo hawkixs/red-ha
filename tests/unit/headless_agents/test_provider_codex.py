@@ -25,6 +25,7 @@ from headless_agents.engine import operator_environment
 from headless_agents.model_vendor import backend_switches, codex_argv_switches
 from headless_agents.profile import CapabilityProfile, McpServer, Workspace
 from headless_agents.providers import codex
+from headless_agents.result import TokenUsage
 from headless_agents.spec import RunSpec
 from headless_agents.structured import SchemaError, schema_text
 
@@ -3038,3 +3039,141 @@ class TestOutputSchema:
         i = command.index("--output-last-message")
         assert command[i - 2 : i] == ["--output-schema", "<run-owned>/output-schema.json"]
         assert not list(tmp_path.rglob("output-schema.json")), "a preview writes no file"
+
+
+# ── usage (spec 2026-10-13 usage and budget §3.1) ──────────────────────────
+
+USAGE_TOOL_COUNTS = Path(__file__).parent / "fixtures" / "tool_counts"
+RECORDED_USAGE = TokenUsage(input=108250, output=2373, fresh=19418, cached=88832, thinking=1814)
+
+
+def _recorded_codex_turn() -> str:
+    """The recorded stream's thread, turn, final message and turn.completed lines."""
+    kept = []
+    for line in (USAGE_TOOL_COUNTS / "codex.events.jsonl").read_text(encoding="utf-8").splitlines():
+        event = json.loads(line)
+        item = event.get("item")
+        if event["type"] in ("thread.started", "turn.started", "turn.completed") or (
+            isinstance(item, dict) and item.get("type") == "agent_message"
+        ):
+            kept.append(line + "\n")
+    return "".join(kept)
+
+
+def _usage_popen(
+    monkeypatch: pytest.MonkeyPatch, *, events: str, code: int = 0, report: str = "R"
+) -> dict[str, object]:
+    seen: dict[str, object] = {}
+
+    def popen(command: list[str], **kwargs: object) -> _FakeProcess:
+        seen["command"] = command
+        report_log = Path(command[command.index("--output-last-message") + 1])
+        fake = _FakeProcess(returncode=code, events=events, report=report)
+        fake.bind(events_stream=kwargs["stdout"], report_log=report_log)
+        return fake
+
+    monkeypatch.setattr(codex.subprocess, "Popen", popen)
+    monkeypatch.setattr(codex, "terminate_process_group", lambda process: process.kill())
+    return seen
+
+
+def _usage_spec(tmp_path: Path, **overrides: object) -> RunSpec:
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    fields: dict[str, object] = {
+        "prompt": "P",
+        "model": "m",
+        "run_dir": tmp_path / "runs" / "r1",
+        "profile": CapabilityProfile(workspace=Workspace(path=ws)),
+        "environment": {"PATH": "/usr/bin"},
+    }
+    fields.update(overrides)
+    return RunSpec(**fields)  # type: ignore[arg-type]
+
+
+class TestCodexUsage:
+    def test_the_single_completed_turn_is_measured(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _usage_popen(monkeypatch, events=_recorded_codex_turn())
+        result = codex.CodexProvider().run(_usage_spec(tmp_path))
+        assert result.exit_code == 0
+        assert result.tokens == RECORDED_USAGE
+        assert result.cost_usd is None
+        written = json.loads((tmp_path / "runs" / "r1" / "result.json").read_text("utf-8"))
+        assert written["tokens"] == {
+            "input": 108250,
+            "output": 2373,
+            "fresh": 19418,
+            "cached": 88832,
+            "thinking": 1814,
+        }
+
+    def test_two_completed_turns_are_not_measured(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _recorded_codex_turn() + _events(_turn_completed())
+        _usage_popen(monkeypatch, events=events)
+        result = codex.CodexProvider().run(_usage_spec(tmp_path))
+        assert result.exit_code == 0
+        assert result.tokens is None
+
+    def test_a_failed_turn_after_a_completed_one_keeps_the_usage_and_the_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _recorded_codex_turn() + _events(
+            {"type": "turn.failed", "error": {"message": "boom"}}
+        )
+        _usage_popen(monkeypatch, events=events, code=1, report="")
+        result = codex.CodexProvider().run(_usage_spec(tmp_path))
+        assert result.exit_code == PROVIDER_FALLBACK_EXIT_CODE
+        assert result.text is None
+        assert result.tokens == RECORDED_USAGE
+
+    def _stale(self, tmp_path: Path) -> Path:
+        run_dir = tmp_path / "runs" / "r1"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        events_log = run_dir / "events.jsonl"
+        events_log.write_text(_recorded_codex_turn(), encoding="utf-8")
+        return events_log
+
+    def test_a_refusal_reads_no_reused_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events_log = self._stale(tmp_path)
+        seen = _usage_popen(monkeypatch, events=_recorded_codex_turn())
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        spec = _usage_spec(
+            tmp_path, profile=CapabilityProfile(mcp=_server(), workspace=Workspace(path=ws))
+        )
+        result = codex.CodexProvider().run(spec)
+        assert result.exit_code == 1, "the bearer variable is missing: refused as today"
+        assert "command" not in seen
+        assert result.tokens is None
+        assert events_log.read_text(encoding="utf-8") == _recorded_codex_turn()
+
+    def test_a_launch_failure_reads_no_reused_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._stale(tmp_path)
+
+        def popen(command: list[str], **kwargs: object) -> None:
+            raise OSError("no such binary")
+
+        monkeypatch.setattr(codex.subprocess, "Popen", popen)
+        result = codex.CodexProvider().run(_usage_spec(tmp_path))
+        assert result.exit_code == PROVIDER_FALLBACK_EXIT_CODE
+        assert result.tokens is None
+
+    def test_an_expired_deadline_reads_no_reused_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events_log = self._stale(tmp_path)
+        seen = _usage_popen(monkeypatch, events=_recorded_codex_turn())
+        monkeypatch.setattr(codex.time, "monotonic", lambda: 1000.0)
+        result = codex.CodexProvider().run(_usage_spec(tmp_path, deadline=999.0))
+        assert result.exit_code == TIMEOUT_EXIT_CODE
+        assert "command" not in seen
+        assert result.tokens is None
+        assert events_log.read_text(encoding="utf-8") == _recorded_codex_turn()

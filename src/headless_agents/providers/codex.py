@@ -34,6 +34,7 @@ from ..capability import (
     failure_code_after_a_write,
     terminate_process_group,
 )
+from ..envelope import codex_usage
 from ..event_log import read_events
 from ..model_vendor import codex_argv_switches
 from ..procgroup import preexec_for, spawn_watched
@@ -43,6 +44,7 @@ from ..run_record import answer_text, record, run_id_of
 from ..sandbox import ephemeral_root
 from ..spec import RunSpec
 from ..structured import is_json_answer, refuse_unsupported, schema_text
+from ..usage import StreamMark
 from ..workspace import (
     armed_run,
     prepend,
@@ -1109,6 +1111,7 @@ def run_codex(
     missing_call_message: str | None = None,
     rollout_log: Path | None = None,
     output_schema: str | None = None,
+    launch: StreamMark | None = None,
 ) -> int:
     """Run one Codex invocation and return its exit code (``124`` on timeout).
 
@@ -1151,6 +1154,10 @@ def run_codex(
     none there. Whether the final message is JSON is not checked here: the
     provider holds the answer to that (:class:`CodexProvider`). ``None`` leaves
     the run exactly as it was.
+
+    ``launch`` receives the ``events_log`` offset at which this invocation's
+    stream starts, set only once the child is launched (spec 2026-10-13 usage
+    §3.1).
     """
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
@@ -1233,6 +1240,8 @@ def run_codex(
             events_log.open("w", encoding="utf-8") as events_stream,
             stderr_log.open("w", encoding="utf-8") as stderr_stream,
         ):
+            # Spec 2026-10-13 usage §3.1: this invocation's bytes start here.
+            start_offset = events_stream.tell()
             popen_kwargs: dict[str, Any] = {}
             if run_environment is not None:
                 popen_kwargs["env"] = run_environment
@@ -1252,6 +1261,8 @@ def run_codex(
                 stderr_stream.write(f"unable to start Codex: {exc}\n")
                 # Codex did not even start: nothing could have been written.
                 return PROVIDER_FALLBACK_EXIT_CODE
+            if launch is not None:
+                launch.offset = start_offset
 
             try:
                 process.communicate(input=prompt, timeout=remaining)
@@ -1508,6 +1519,7 @@ class CodexProvider:
         assert spec.events_log is not None
         assert spec.stderr_log is not None
         start = time.monotonic()
+        launch = StreamMark()
         workspace = workspace_of(spec)
         prompt = prepend(_preamble_for(spec, workspace), spec.prompt)
         tripwire = armed_run(workspace)
@@ -1529,8 +1541,10 @@ class CodexProvider:
             output_schema=(
                 schema_text(spec.output_schema) if spec.output_schema is not None else None
             ),
+            launch=launch,
         )
         duration = time.monotonic() - start
+        invocation_events = launch.read(spec.events_log)
         exit_code, git_tampered = settle_run(tripwire, exit_code, spec.stderr_log)
         # --output-last-message: the report holds the final agent message.
         text = answer_text(spec.report_log, exit_code=exit_code)
@@ -1548,10 +1562,9 @@ class CodexProvider:
                 model=spec.model,
                 report_path=spec.report_log,
                 events_log=spec.events_log,
-                # Not measured here: the envelope module reads turn.completed usage
-                # for a caller that wants it. ``None`` means "not measured", never
-                # a fabricated zero -- see ``result``'s docstring.
-                tokens=None,
+                # Spec 2026-10-13 usage §3.1: the single turn.completed this invocation
+                # wrote; codex reports no cost (D3).
+                tokens=codex_usage(invocation_events) if invocation_events is not None else None,
                 duration_seconds=duration,
                 tool_call_completed=(
                     server is not None and tool_call_completed(spec.events_log, server=server)
