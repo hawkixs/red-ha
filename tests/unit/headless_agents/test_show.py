@@ -973,3 +973,33 @@ def test_a_new_shape_check_is_loaded_from_review_records(home: Home) -> None:
     reviews.write_check(home.state, REVIEW, check)
     reviews.write_result(home.state, REVIEW, head=PINNED, verdict="approve", text="ok", check=check)
     assert home.rebuild(REVIEW).report["vendor_check"] == check.to_document()
+
+
+# ── run totals (spec 2026-10-13 usage and budget §3.3) ──────────────────────
+
+
+def test_the_run_totals_follow_the_steps(home: Home) -> None:
+    report = home.report(
+        tokens={"input": 30104, "output": 541, "fresh": None, "cached": None, "thinking": None},
+        tokens_complete=True,
+        cost_usd=0.0253,
+        cost_complete=False,
+    )
+    lines = show.render(_shown(report, task="Explain what this repository does.")).splitlines()
+    assert lines[3] == "total   in 30k out 541  $0.03 (incomplete)"
+    assert lines[4] == "--- run ---"
+
+
+def test_incomplete_tokens_are_marked(home: Home) -> None:
+    report = home.report(
+        tokens={"input": 1_500_000, "output": 3000},
+        tokens_complete=False,
+        cost_usd=None,
+        cost_complete=False,
+    )
+    assert "total   in 1.5M out 3k (incomplete)  -" in show.render(_shown(report)).splitlines()
+
+
+def test_a_report_without_run_totals_prints_no_total_line(home: Home) -> None:
+    rendered = show.render(_shown(home.report())).splitlines()
+    assert not any(line.startswith("total") for line in rendered)

@@ -420,6 +420,21 @@ def format_tokens(tokens: object) -> str:
     return f"in {_thousands(given)} out {_thousands(produced)}"
 
 
+def _totals_line(report: Mapping[str, object]) -> str | None:
+    """``total   in 30k out 541  $0.03``: the run totals, attempts included (spec
+    2026-10-13 usage §3.3); ``None`` for a report written before run totals existed."""
+    complete = report.get("tokens_complete")
+    if not isinstance(complete, bool):
+        return None
+    tokens = format_tokens(report.get("tokens"))
+    if tokens != "-" and not complete:
+        tokens += " (incomplete)"
+    cost = format_cost(report.get("cost_usd"))
+    if cost != "-" and report.get("cost_complete") is False:
+        cost += " (incomplete)"
+    return f"total   {tokens}  {cost}"
+
+
 def format_tools(tools: object) -> str:
     """``read 25, edit 11``, most used first; ``none`` for ``{}``; ``-`` when not measured."""
     if not isinstance(tools, dict):
@@ -592,6 +607,9 @@ def render(shown: Shown) -> str:
         else []
     )
     lines.extend(_table(rows))
+    totals = _totals_line(report)
+    if totals is not None:
+        lines.append(totals)
     text = report.get("text")
     if isinstance(text, str) and text.strip():
         lines.append(f"--- {rows[-1][0] if rows else 'run'} ---")
