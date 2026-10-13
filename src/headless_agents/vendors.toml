@@ -1,0 +1,49 @@
+[providers]   # how each provider names its vendor
+claude     = { vendor = "anthropic" }   # guarded by D2bis
+codex      = { vendor = "openai" }      # guarded by D2bis
+vibe       = { vendor = "mistral" }
+mistral    = { vendor = "mistral" }     # the Mistral API serves Mistral models only
+agy        = { grammar = "bare" }       # Antigravity hosts several labs
+openrouter = { grammar = "org" }        # "<org>/<model>"
+nvidia     = { grammar = "org" }        # "<org>/<model>"
+opencode   = { grammar = "opencode" }   # "<opencode provider>/<rest>"
+
+[orgs]        # the org segment of an "org" grammar -> vendor
+anthropic = "anthropic"
+openai = "openai"
+google = "google"
+mistralai = "mistral"
+deepseek = "deepseek"
+deepseek-ai = "deepseek"
+z-ai = "zhipu"
+moonshotai = "moonshot"
+qwen = "alibaba"
+meta = "meta"
+meta-llama = "meta"
+x-ai = "xai"
+nvidia = "nvidia"
+
+[bare]        # model-name glob -> vendor, for "bare" grammars only
+"claude-*" = "anthropic"
+"gpt-*" = "openai"
+"o[0-9]*" = "openai"
+"gemini-*" = "google"
+"mistral-*" = "mistral"
+"devstral-*" = "mistral"
+"magistral-*" = "mistral"
+"codestral-*" = "mistral"
+"deepseek-*" = "deepseek"
+"glm-*" = "zhipu"
+"kimi-*" = "moonshot"
+"qwen*" = "alibaba"
+
+[opencode]    # opencode's own provider id -> how to read the rest
+openrouter = { grammar = "org" }
+nvidia = { grammar = "org" }
+opencode-go = { grammar = "bare" }
+opencode = { grammar = "bare" }         # OpenCode Zen
+anthropic = { vendor = "anthropic" }
+openai = { vendor = "openai" }
+google = { vendor = "google" }
+mistral = { vendor = "mistral" }
+deepseek = { vendor = "deepseek" }
