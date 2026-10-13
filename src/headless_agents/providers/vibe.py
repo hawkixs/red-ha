@@ -503,7 +503,6 @@ def run_vibe(
                     stdout=events_stream,
                     stderr=stderr_stream,
                     cwd=home,
-                    # Rebuilt inside run_vibe around the ephemeral HOME and the resolved key.
                     env=child_environment(home, ambient, profile, api_key=api_key),
                     text=True,
                     start_new_session=True,
@@ -595,6 +594,7 @@ class VibeProvider:
         )
 
     def child_environment(self, spec: RunSpec, environ: Mapping[str, str]) -> dict[str, str] | None:
+        # Rebuilt inside run_vibe around the ephemeral HOME and the resolved key.
         return None
 
     def prepare_home(self, spec: RunSpec) -> Path | None:
