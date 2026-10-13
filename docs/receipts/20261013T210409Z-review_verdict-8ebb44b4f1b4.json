@@ -1,0 +1,81 @@
+{
+  "digest": "sha256:8ebb44b4f1b48e62a6be9b5d96d11ff8f3b0209a0bcc14bd47695b726a2f9fab",
+  "idempotency_key": "review_verdict:4a112699b646c18e5ba484ed3f0ae5125ed48785:115536401060",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": false,
+      "carry_forwards": {
+        "addressed": [],
+        "deferred": [
+          "CF-4-3"
+        ]
+      },
+      "check_run_id": 115536401060,
+      "diff_truncated": false,
+      "finding_count": 4,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "agy's _run records `start_offset = events_stream.tell()` from a handle opened with `open(\"w\", encoding=\"utf-8\")`, while `usage.StreamMark.read` later seeks that value on a `\"rb\"` handle; a text-mode tell is an opaque cookie, not a byte offset. It only equals 0 today because the log is truncated at o",
+          "file": "src/headless_agents/providers/agy.py",
+          "id": "F-19-1",
+          "line": 745,
+          "severity": "minor",
+          "status": "new",
+          "title": "StreamMark offset is a text-mode tell cookie consumed as a binary seek offset"
+        },
+        {
+          "class": "note",
+          "evidence": "`new_report` sets `tokens_complete=True` but adds no `tokens` key, so the pre-step `write_report(run_dir, report)` in engine.execute publishes a report whose top level lacks `tokens` even though RUN_KEYS now lists it. Every consumer reads via `.get()`, so it is cosmetic and mirrors the pre-existing ",
+          "file": "src/headless_agents/report.py",
+          "id": "F-19-2",
+          "line": 62,
+          "severity": "minor",
+          "status": "new",
+          "title": "Intermediate run.json omits `tokens` while RUN_KEYS declares it and tokens_complete reads True"
+        },
+        {
+          "class": "note",
+          "evidence": "test_a_max_turns_envelope_measures_but_answers_nothing and test_a_schema_run_that_ran_out_of_turns_still_measures assert cost_usd == 0.025328600000000003 exactly; the pin is deterministic on the fixture but brittle to any change in summation order or precision, where pytest.approx (used elsewhere, e",
+          "file": "tests/unit/headless_agents/test_provider_claude.py",
+          "id": "F-19-3",
+          "line": null,
+          "severity": "minor",
+          "status": "new",
+          "title": "Exact float equality on pinned cost"
+        },
+        {
+          "class": "note",
+          "evidence": "The new TestCodexUsage tests construct _FakeProcess(returncode=..., events=..., report=...) with bind(events_stream=..., report_log=...) and use pre-existing helpers _events/_turn_completed; those definitions sit in the unchanged portion of the file that this part does not show, so their compatibili",
+          "file": "tests/unit/headless_agents/test_provider_codex.py",
+          "id": "F-19-4",
+          "line": null,
+          "severity": "minor",
+          "status": "new",
+          "title": "New usage tests lean on fakes outside the visible diff"
+        }
+      ],
+      "independent": true,
+      "mode": "deep",
+      "not_reviewed": [],
+      "pr": 19,
+      "providers": [
+        "glm",
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "4a112699b646c18e5ba484ed3f0ae5125ed48785",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T21:04:09.989360Z",
+  "schema_version": 1
+}
