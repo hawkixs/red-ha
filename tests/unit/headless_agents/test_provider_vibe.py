@@ -73,8 +73,13 @@ class TestVibeConfig:
     def test_turns_every_side_channel_off(self) -> None:
         config = self._parsed()
         for key in (
-            "enable_telemetry", "enable_auto_update", "enable_update_checks", "enable_connectors",
-            "enable_notifications", "include_project_context", "include_commit_signature",
+            "enable_telemetry",
+            "enable_auto_update",
+            "enable_update_checks",
+            "enable_connectors",
+            "enable_notifications",
+            "include_project_context",
+            "include_commit_signature",
         ):
             assert config[key] is False, key
         assert config["session_logging"] == {"enabled": False, "generate_titles": False}
@@ -88,7 +93,8 @@ class TestVibeConfig:
     def test_writes_each_tool_permission(self) -> None:
         config = self._parsed(write_file="never", bash="always")
         assert config["tools"] == {
-            "bash": {"permission": "always"}, "write_file": {"permission": "never"},
+            "bash": {"permission": "always"},
+            "write_file": {"permission": "never"},
         }
 
     def test_refuses_an_invalid_model_before_writing_anything(self) -> None:
@@ -111,20 +117,40 @@ class TestBuildCommand:
             workdir=tmp_path, enabled=("read_file", "write_file"), max_turns=50
         )
         assert command == [
-            "vibe", "--workdir", str(tmp_path), "--agent", "accept-edits", "--enabled-tools",
-            "read_file", "--enabled-tools", "write_file", "--max-turns", "50", "--output",
-            "streaming", "-p",
+            "vibe",
+            "--workdir",
+            str(tmp_path),
+            "--agent",
+            "accept-edits",
+            "--enabled-tools",
+            "read_file",
+            "--enabled-tools",
+            "write_file",
+            "--max-turns",
+            "50",
+            "--output",
+            "streaming",
+            "-p",
         ]
 
     def test_never_passes_a_trust_or_approval_flag(self, tmp_path: Path) -> None:
         command = vibe.build_vibe_command(workdir=tmp_path, enabled=("read_file",), max_turns=5)
         for flag in (
-            "--trust", "--yolo", "--auto-approve", "--smart-approve", "--add-dir", "--worktree",
-            "--max-price", "--continue", "-c", "--resume",
+            "--trust",
+            "--yolo",
+            "--auto-approve",
+            "--smart-approve",
+            "--add-dir",
+            "--worktree",
+            "--max-price",
+            "--continue",
+            "-c",
+            "--resume",
         ):
             assert flag not in command
 
     def test_refuses_an_empty_tool_list(self, tmp_path: Path) -> None:
+        # Measured (s11): no --enabled-tools at all enables EVERY tool.
         with pytest.raises(ValueError, match="at least one tool"):
             vibe.build_vibe_command(workdir=tmp_path, enabled=(), max_turns=5)
 
@@ -155,7 +181,9 @@ def _assistant(text: str) -> dict[str, object]:
     return {"type": "message", "role": "assistant", "content": [{"type": "text", "text": text}]}
 
 
-def _effect(tool: str, status: str, code: str | None = None, entry_id: str = "e1") -> dict[str, object]:
+def _effect(
+    tool: str, status: str, code: str | None = None, entry_id: str = "e1"
+) -> dict[str, object]:
     state: dict[str, object] = {"status": status}
     if code is not None:
         state["error"] = {"code": code, "message": "x", "details": None}
@@ -180,7 +208,11 @@ class TestStreamValidity:
         assert "not JSON lines" in (vibe.stream_error(events) or "")
 
     def test_stream_error_on_an_error_notice(self, tmp_path: Path) -> None:
-        events = _write(tmp_path, {"type": "notice", "level": "error", "message": "rate limited"}, _assistant("partial"))
+        events = _write(
+            tmp_path,
+            {"type": "notice", "level": "error", "message": "rate limited"},
+            _assistant("partial"),
+        )
         assert "rate limited" in (vibe.stream_error(events) or "")
 
     def test_stream_error_on_an_empty_final_answer(self, tmp_path: Path) -> None:
@@ -193,7 +225,12 @@ class TestStreamValidity:
 
 class TestReport:
     def test_the_report_is_the_last_assistant_text(self, tmp_path: Path) -> None:
-        events = _write(tmp_path, _assistant("first"), _effect("file_system.read_file", "completed"), _assistant("final answer"))
+        events = _write(
+            tmp_path,
+            _assistant("first"),
+            _effect("file_system.read_file", "completed"),
+            _assistant("final answer"),
+        )
         report = tmp_path / "report.log"
         vibe.extract_report(events, report)
         assert report.read_text() == "final answer"
@@ -252,17 +289,44 @@ class TestPredicates:
         assert vibe.write_tool_started(absent)
 
 
+class TestLargeFourStreams:
+    """``mistral-large-4`` (spec amendment A2) adds ``reasoning`` entries to the stream:
+    they are neither effects nor messages and change no verdict."""
+
+    def test_a_read_with_reasoning_entries_is_valid(self, tmp_path: Path) -> None:
+        events = _copy(tmp_path, "read-large4-reasoning.events.jsonl")
+        assert vibe.stream_error(events) is None
+        report = tmp_path / "report.log"
+        vibe.extract_report(events, report)
+        assert "MARKER-INSIDE-7f3a" in report.read_text()
+        assert not vibe.write_tool_started(events)
+        assert vibe.count_tools(events) == {"file_system.bash": 1, "file_system.read_file": 1}
+
+    def test_a_write_with_reasoning_entries_is_a_write(self, tmp_path: Path) -> None:
+        events = _copy(tmp_path, "write-large4-reasoning.events.jsonl")
+        assert vibe.stream_error(events) is None
+        assert vibe.write_tool_started(events)
+        assert vibe.tool_call_completed(events)
+        assert vibe.count_tools(events) == {"file_system.write_file": 2}
+
+
 class TestCountTools:
     def test_counts_effects_by_tool_name(self, tmp_path: Path) -> None:
         counts = vibe.count_tools(_copy(tmp_path, "write-inside-outside.events.jsonl"))
         assert counts == {"file_system.write_file": 2}
 
     def test_deduplicates_by_entry_id(self, tmp_path: Path) -> None:
-        events = _write(tmp_path, _effect("file_system.read_file", "completed", entry_id="a"), _effect("file_system.read_file", "completed", entry_id="a"))
+        events = _write(
+            tmp_path,
+            _effect("file_system.read_file", "completed", entry_id="a"),
+            _effect("file_system.read_file", "completed", entry_id="a"),
+        )
         assert vibe.count_tools(events) == {"file_system.read_file": 1}
 
     def test_none_when_an_effect_lacks_an_id_or_a_tool(self, tmp_path: Path) -> None:
-        events = _write(tmp_path, {"type": "effect", "detail": {}, "state": {"status": "completed"}})
+        events = _write(
+            tmp_path, {"type": "effect", "detail": {}, "state": {"status": "completed"}}
+        )
         assert vibe.count_tools(events) is None
 
     def test_none_when_unreadable_or_absent(self, tmp_path: Path) -> None:
@@ -283,7 +347,9 @@ class TestHome:
 
 
 class TestPassthrough:
-    @pytest.mark.parametrize("name", ["VIBE_ACTIVE_MODEL", "vibe_home", "VIBE_BYPASS_TOOL_PERMISSIONS"])
+    @pytest.mark.parametrize(
+        "name", ["VIBE_ACTIVE_MODEL", "vibe_home", "VIBE_BYPASS_TOOL_PERMISSIONS"]
+    )
     def test_a_vibe_variable_is_refused(self, name: str) -> None:
         profile = CapabilityProfile(environment_passthrough=(name,))
         assert "VIBE_" in (vibe.passthrough_refusal(profile) or "").upper()
@@ -315,15 +381,27 @@ class TestApiKey:
 class TestChildEnvironment:
     def test_an_allowlist_with_the_key_and_the_marker(self, tmp_path: Path) -> None:
         ambient = {
-            "PATH": "/bin", "LANG": "C.UTF-8", "VIBE_ACTIVE_MODEL": "devstral",
-            "VIBE_BYPASS_TOOL_PERMISSIONS": "true", "OPENAI_API_KEY": "other", "UV_CACHE_DIR": "/cache",
+            "PATH": "/bin",
+            "LANG": "C.UTF-8",
+            "VIBE_ACTIVE_MODEL": "devstral",
+            "VIBE_BYPASS_TOOL_PERMISSIONS": "true",
+            "OPENAI_API_KEY": "other",
+            "UV_CACHE_DIR": "/cache",
         }
-        profile = CapabilityProfile(environment_passthrough=("UV_CACHE_DIR", "VIBE_BYPASS_TOOL_PERMISSIONS"))
+        profile = CapabilityProfile(
+            environment_passthrough=("UV_CACHE_DIR", "VIBE_BYPASS_TOOL_PERMISSIONS")
+        )
         child = vibe.child_environment(tmp_path, ambient, profile, api_key="secret")
         assert child == {
-            "HOME": str(tmp_path), "VIBE_HOME": str(tmp_path / ".vibe"), "TMPDIR": str(tmp_path),
-            "PATH": "/bin", "LANG": "C.UTF-8", "TERM": "dumb", "AI_AGENT": "vibe",
-            "MISTRAL_API_KEY": "secret", "UV_CACHE_DIR": "/cache",
+            "HOME": str(tmp_path),
+            "VIBE_HOME": str(tmp_path / ".vibe"),
+            "TMPDIR": str(tmp_path),
+            "PATH": "/bin",
+            "LANG": "C.UTF-8",
+            "TERM": "dumb",
+            "AI_AGENT": "vibe",
+            "MISTRAL_API_KEY": "secret",
+            "UV_CACHE_DIR": "/cache",
         }
 
     def test_a_passthrough_never_overrides_ha(self, tmp_path: Path) -> None:

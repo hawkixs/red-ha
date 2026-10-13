@@ -49,7 +49,8 @@ from ..profile import CapabilityProfile, Workspace
 
 SUPPORTED_VERSION: Final = "2.26.0"
 CLOSED_LOOPBACK: Final = "http://127.0.0.1:9"
-# Catalogue names a read-only workspace enables. No grep: the default runtime has none (measured 2026-10-13, Task 0 M2: the model fell back to bash, denied).
+#: Catalogue names a read-only workspace enables. No grep: the default runtime has
+#: none (measured 2026-10-13, Task 0 M2: the model fell back to bash, denied).
 READ_TOOLS: Final[tuple[str, ...]] = ("read_file",)
 WRITE_TOOLS: Final = ("write_file", "edit")
 SHELL_TOOL: Final = "bash"
@@ -61,7 +62,9 @@ _KEY_VARIABLE: Final = "MISTRAL_API_KEY"
 def validate_model(model: str) -> str:
     """Return a plain model identifier, refusing values unsafe in TOML."""
     if not _MODEL_ID.fullmatch(model):
-        raise ValueError(f"vibe: model id {model!r} is not a plain identifier (letters, digits and ._:/- only, at most 128 characters)")
+        raise ValueError(
+            f"vibe: model id {model!r} is not a plain identifier (letters, digits and ._:/- only, at most 128 characters)"
+        )
     return model
 
 
@@ -69,7 +72,11 @@ def tool_lists(workspace: Workspace | None) -> tuple[tuple[str, ...], dict[str, 
     """Return enabled tools and explicit per-tool permissions for a workspace."""
     if workspace is None or not workspace.write:
         return READ_TOOLS, {"write_file": "never", "edit": "never", SHELL_TOOL: "never"}
-    permissions = {"write_file": "always", "edit": "always", SHELL_TOOL: "always" if workspace.shell else "never"}
+    permissions = {
+        "write_file": "always",
+        "edit": "always",
+        SHELL_TOOL: "always" if workspace.shell else "never",
+    }
     return (*READ_TOOLS, *WRITE_TOOLS, *((SHELL_TOOL,) if workspace.shell else ())), permissions
 
 
@@ -89,16 +96,23 @@ def _dump_toml(document: Mapping[str, object]) -> str:
             raise ValueError(f"vibe: invalid configuration key {key!r}")
         if isinstance(value, list):
             for item in value:
-                sections.append(f"[[{key}]]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in item.items()))
+                sections.append(
+                    f"[[{key}]]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in item.items())
+                )
         elif isinstance(value, dict):
             plain = {k: v for k, v in value.items() if not isinstance(v, dict)}
             nested = {k: v for k, v in value.items() if isinstance(v, dict)}
             if plain:
-                sections.append(f"[{key}]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in plain.items()))
+                sections.append(
+                    f"[{key}]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in plain.items())
+                )
             for name, table in nested.items():
                 if not re.fullmatch(r"[a-z_]+", name):
                     raise ValueError(f"vibe: invalid configuration key {name!r}")
-                sections.append(f"[{key}.{name}]\n" + "".join(f"{k} = {_toml_value(v)}\n" for k, v in table.items()))
+                sections.append(
+                    f"[{key}.{name}]\n"
+                    + "".join(f"{k} = {_toml_value(v)}\n" for k, v in table.items())
+                )
         else:
             scalars.append(f"{key} = {_toml_value(value)}\n")
     text = "".join(scalars) + "".join(f"\n{section}" for section in sections)
@@ -114,21 +128,31 @@ def vibe_config(*, model: str, permissions: Mapping[str, str]) -> str:
         if permission not in _PERMISSIONS or not re.fullmatch(r"[a-z_]+", tool):
             raise ValueError(f"vibe: unsupported permission {permission!r} for tool {tool!r}")
     document: dict[str, object] = {
-        "active_model": model, "enable_telemetry": False, "enable_auto_update": False,
-        "enable_update_checks": False, "enable_connectors": False, "enable_notifications": False,
-        "include_project_context": False, "include_commit_signature": False,
-        "vibe_base_url": CLOSED_LOOPBACK, "vibe_code_sessions_base_url": CLOSED_LOOPBACK,
+        "active_model": model,
+        "enable_telemetry": False,
+        "enable_auto_update": False,
+        "enable_update_checks": False,
+        "enable_connectors": False,
+        "enable_notifications": False,
+        "include_project_context": False,
+        "include_commit_signature": False,
+        "vibe_base_url": CLOSED_LOOPBACK,
+        "vibe_code_sessions_base_url": CLOSED_LOOPBACK,
         "console_base_url": CLOSED_LOOPBACK,
         "models": [{"name": model, "provider": "mistral", "alias": model}],
         "session_logging": {"enabled": False, "generate_titles": False},
         "experiments": {"enable": False},
     }
     if permissions:
-        document["tools"] = {tool: {"permission": permissions[tool]} for tool in sorted(permissions)}
+        document["tools"] = {
+            tool: {"permission": permissions[tool]} for tool in sorted(permissions)
+        }
     return _dump_toml(document)
 
 
-def build_vibe_command(*, workdir: Path, enabled: Sequence[str], max_turns: int, executable: str = "vibe") -> list[str]:
+def build_vibe_command(
+    *, workdir: Path, enabled: Sequence[str], max_turns: int, executable: str = "vibe"
+) -> list[str]:
     """Build the programmatic command; callers provide the prompt on stdin."""
     if not enabled:
         raise ValueError("vibe: at least one tool must be enabled (none would enable all)")
@@ -141,9 +165,10 @@ def build_vibe_command(*, workdir: Path, enabled: Sequence[str], max_turns: int,
     return command
 
 
-# Effect names that only read. Everything else -- including a tool a later Vibe adds -- counts as a possible write until it is classified here.
+#: Effect names that only read. Everything else -- including a tool a later Vibe
+#: adds -- counts as a possible write until it is classified here.
 READ_EFFECTS: Final[frozenset[str]] = frozenset({"file_system.read_file", "search_tool_functions"})
-# The effect names that write a file (confinement evidence, Task 6).
+#: The effect names that write a file (confinement evidence).
 WRITE_EFFECTS: Final = frozenset({"file_system.write_file", "file_system.search_replace"})
 
 
@@ -166,14 +191,22 @@ def denied(effect: Mapping[str, object]) -> bool:
     """Whether Vibe's gate refused an effect before it ran."""
     state = _state(effect)
     error = state.get("error")
-    return state.get("status") == "failed" and isinstance(error, dict) and error.get("code") == "tool_denied"
+    return (
+        state.get("status") == "failed"
+        and isinstance(error, dict)
+        and error.get("code") == "tool_denied"
+    )
 
 
 def _text(entry: Mapping[str, object]) -> str:
     content = entry.get("content")
     if not isinstance(content, list):
         return ""
-    return "".join(str(block.get("text") or "") for block in content if isinstance(block, dict) and block.get("type") == "text").strip()
+    return "".join(
+        str(block.get("text") or "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ).strip()
 
 
 def _is_assistant(entry: Mapping[str, object]) -> bool:
@@ -234,13 +267,26 @@ def tool_call_started(events_log: Path) -> bool:
 def write_tool_started(events_log: Path) -> bool:
     """Return whether a possible write started, failing closed on an unreadable stream."""
     entries = read_events(events_log)
-    return True if entries is None else any(_tool(effect) not in READ_EFFECTS and not denied(effect) for effect in _effects(entries))
+    return (
+        True
+        if entries is None
+        else any(
+            _tool(effect) not in READ_EFFECTS and not denied(effect) for effect in _effects(entries)
+        )
+    )
 
 
 def tool_call_completed(events_log: Path) -> bool:
     """Return whether the stream proves a non-read effect completed."""
     entries = read_events(events_log)
-    return False if entries is None else any(_state(effect).get("status") == "completed" and _tool(effect) not in READ_EFFECTS for effect in _effects(entries))
+    return (
+        False
+        if entries is None
+        else any(
+            _state(effect).get("status") == "completed" and _tool(effect) not in READ_EFFECTS
+            for effect in _effects(entries)
+        )
+    )
 
 
 def count_tools(events_log: Path | None) -> dict[str, int] | None:
@@ -296,15 +342,27 @@ def resolve_api_key(ambient: Mapping[str, str]) -> tuple[str | None, str | None]
     except KeysError as exc:
         return None, f"vibe: no usable Mistral key: {exc}"
     if found is None:
-        return None, f"vibe: no Mistral key: set {_KEY_VARIABLE}, or declare a key file for mistral in keys.toml"
+        return (
+            None,
+            f"vibe: no Mistral key: set {_KEY_VARIABLE}, or declare a key file for mistral in keys.toml",
+        )
     return found.value, None
 
 
-def child_environment(home: Path, ambient: Mapping[str, str], profile: CapabilityProfile, *, api_key: str) -> dict[str, str]:
+def child_environment(
+    home: Path, ambient: Mapping[str, str], profile: CapabilityProfile, *, api_key: str
+) -> dict[str, str]:
     """Build the child's allowlisted environment from scratch."""
-    child = {"HOME": str(home), "VIBE_HOME": str(home / ".vibe"), "TMPDIR": str(home),
-             "PATH": ambient.get("PATH", "/usr/bin:/bin"), "LANG": ambient.get("LANG", "C.UTF-8"),
-             "TERM": "dumb", AGENT_MARKER_VARIABLE: "vibe", _KEY_VARIABLE: api_key}
+    child = {
+        "HOME": str(home),
+        "VIBE_HOME": str(home / ".vibe"),
+        "TMPDIR": str(home),
+        "PATH": ambient.get("PATH", "/usr/bin:/bin"),
+        "LANG": ambient.get("LANG", "C.UTF-8"),
+        "TERM": "dumb",
+        AGENT_MARKER_VARIABLE: "vibe",
+        _KEY_VARIABLE: api_key,
+    }
     for name in profile.environment_passthrough:
         if name in ambient and name not in child and not name.upper().startswith("VIBE_"):
             child[name] = ambient[name]
