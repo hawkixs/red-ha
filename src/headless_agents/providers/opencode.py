@@ -69,6 +69,7 @@ non-TTY pipe.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -76,9 +77,11 @@ import tempfile
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from ..budget import Ledger
 from ..capability import (
     AGENT_MARKER_VARIABLE,
     INVALID_USAGE_EXIT_CODE,
@@ -582,6 +585,14 @@ def extract_report(events_log: Path, report_log: Path) -> None:
     printed in a message of its own survives. A fence around the whole
     report is removed (see :func:`_unwrap_fence`).
     """
+    report = report_text(events_log)
+    if report.strip():
+        report_log.write_text(report, encoding="utf-8")
+
+
+def report_text(events_log: Path) -> str:
+    """The text :func:`extract_report` writes, without writing it: also what a run stopped
+    on its budget cap had said so far (spec 2026-10-13 usage and budget §3.6)."""
     texts: dict[str, str] = {}
     for index, event in enumerate(_events(events_log)):
         if event.get("type") != "text":
@@ -593,9 +604,7 @@ def extract_report(events_log: Path, report_log: Path) -> None:
         part_id = part.get("id")
         key = part_id if isinstance(part_id, str) else f"#{index}"
         texts[key] = text
-    report = _unwrap_fence("\n\n".join(text for text in texts.values() if text.strip()))
-    if report.strip():
-        report_log.write_text(report, encoding="utf-8")
+    return _unwrap_fence("\n\n".join(text for text in texts.values() if text.strip()))
 
 
 def _error_message(event: Mapping[str, object]) -> str:
@@ -709,6 +718,216 @@ def telemetry(events_log: Path) -> tuple[TokenUsage | None, float | None]:
         ),
         cost,
     )
+
+
+def _step_key(event: Mapping[str, object], position: int) -> str:
+    """A part's id, or its position in the stream when it has none."""
+    part_id = _part(event).get("id")
+    return part_id if isinstance(part_id, str) else f"#{position}"
+
+
+def unfinished_step(events_log: Path) -> bool:
+    """A ``step_start`` that no ``step_finish`` matched: a model call killed in flight,
+    whose consumption is unknown (spec 2026-10-13 usage and budget §3.6). Parts count
+    once each, whatever their re-emissions."""
+    starts: set[str] = set()
+    finishes: set[str] = set()
+    for position, event in enumerate(_events(events_log)):
+        kind = event.get("type")
+        if kind == "step_start":
+            starts.add(_step_key(event, position))
+        elif kind == "step_finish":
+            finishes.add(_step_key(event, position))
+    return len(starts) > len(finishes)
+
+
+def _non_negative(value: object) -> float | None:
+    """A finite number ``>= 0``, else ``None``: an int too large for a float is no measure."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _token_count(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def part_cost(part: Mapping[str, object]) -> float | None:
+    """A ``step_finish`` part's cost in USD; ``None`` when absent or malformed. A
+    measured zero is a measure."""
+    return _non_negative(part.get("cost"))
+
+
+def part_input_tokens(part: Mapping[str, object]) -> int | None:
+    """A ``step_finish`` part's total input, cache reads included (the figure D5's
+    ``--max-input-tokens`` caps); ``None`` when the ``tokens`` block, its ``input`` or
+    its ``cache.read`` is absent or malformed."""
+    tokens = part.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    cache = tokens.get("cache")
+    fresh = _token_count(tokens.get("input"))
+    read = _token_count(cache.get("read")) if isinstance(cache, dict) else None
+    if fresh is None or read is None:
+        return None
+    return fresh + read
+
+
+def _part_token_fields(part: Mapping[str, object]) -> dict[str, int | None]:
+    """A ``step_finish`` part's token fields, normalised as :func:`telemetry` does, each
+    one validated on its own: an absent or malformed field is ``None`` and leaves the
+    others standing (a block without ``output`` still reports its input)."""
+    tokens = part.get("tokens")
+    block = tokens if isinstance(tokens, dict) else {}
+    cache = block.get("cache")
+    return {
+        "input": part_input_tokens(part),
+        "output": _token_count(block.get("output")),
+        "fresh": _token_count(block.get("input")),
+        "cached": _token_count(cache.get("read")) if isinstance(cache, dict) else None,
+        "thinking": _token_count(block.get("reasoning")),
+    }
+
+
+@dataclass(frozen=True)
+class StepUsage:
+    """A capped step's usage from the parts its meter validated (spec 2026-10-13 usage
+    §3.6): the figures its ``RunResult`` and the ledger agree on. ``complete`` is false
+    when they are only a lower bound."""
+
+    tokens: TokenUsage | None
+    cost_usd: float | None
+    complete: bool
+
+
+class StepMeter:
+    """One capped opencode step, read incrementally into the run's :class:`Ledger`
+    (spec 2026-10-13 usage and budget §3.6).
+
+    Each :meth:`read` takes what the stream gained since the last one. An incomplete
+    trailing line waits for its newline (the final read takes it as it is). A
+    ``step_finish`` part re-emitted across reads REPLACES its earlier version, the
+    last-version-wins rule of :func:`step_finish_parts` made incremental, and the
+    ledger gets the step's new totals.
+    """
+
+    def __init__(self, ledger: Ledger) -> None:
+        self.ledger = ledger
+        self._offset = 0
+        self._pending = b""
+        self._position = 0
+        self._starts: set[str] = set()
+        self._finishes: dict[str, Mapping[str, object]] = {}
+
+    def read(self, events_log: Path, *, final: bool = False) -> None:
+        """Take the bytes ``events_log`` gained since the last read. Never raises: an
+        unreadable stream reads as nothing new."""
+        try:
+            with events_log.open("rb") as stream:
+                stream.seek(self._offset)
+                chunk = stream.read()
+        except OSError:
+            chunk = b""
+        self._offset += len(chunk)
+        lines = (self._pending + chunk).split(b"\n")
+        self._pending = lines.pop()
+        if final and self._pending:
+            lines.append(self._pending)
+            self._pending = b""
+        for line in lines:
+            self._take(line)
+
+    def _take(self, raw: bytes) -> None:
+        position = self._position
+        self._position += 1
+        try:
+            event = json.loads(raw.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict):
+            return
+        kind = event.get("type")
+        if kind == "step_start":
+            self._starts.add(_step_key(event, position))
+        elif kind == "step_finish":
+            key = _step_key(event, position)
+            if key not in self._finishes and self.ledger.steps_after_crossing is not None:
+                self.ledger.steps_after_crossing += 1
+            self._finishes[key] = _part(event)
+            self._charge()
+
+    def _charge(self) -> None:
+        cost: float | None = None
+        tokens: int | None = None
+        for part in self._finishes.values():
+            spent = part_cost(part)
+            if spent is not None:
+                cost = spent if cost is None else cost + spent
+            given = part_input_tokens(part)
+            if given is not None:
+                tokens = given if tokens is None else tokens + given
+        self.ledger.measure(cost=cost, input_tokens=tokens)
+
+    @property
+    def unmeasured(self) -> bool:
+        """A finished call lacks the measure a cap needs: the allowance is unknowable."""
+        caps = self.ledger.caps
+        return any(
+            (caps.max_cost is not None and part_cost(part) is None)
+            or (caps.max_input_tokens is not None and part_input_tokens(part) is None)
+            for part in self._finishes.values()
+        )
+
+    @property
+    def in_flight(self) -> bool:
+        """A call started and not finished: its consumption is unknown."""
+        return len(self._starts) > len(self._finishes)
+
+    @property
+    def must_stop(self) -> bool:
+        return self.ledger.crossed or self.unmeasured
+
+    def usage(self) -> StepUsage:
+        """The step's usage, summed from validated values only: an absent, malformed or
+        non-finite value is never summed (never a ``NaN`` in ``run.json``), and each token
+        field is summed on its own. Complete when no call is in flight, no finish lacks
+        what a cap needs, and each measure -- the cost, every token field -- is reported by
+        every finished part or by none."""
+        parts = list(self._finishes.values())
+        costs = [cost for cost in (part_cost(part) for part in parts) if cost is not None]
+        complete = not self.in_flight and not self.unmeasured and len(costs) in (0, len(parts))
+        fields = [_part_token_fields(part) for part in parts]
+        totals: dict[str, int | None] = {}
+        for name in ("input", "output", "fresh", "cached", "thinking"):
+            found = [value for value in (field[name] for field in fields) if value is not None]
+            totals[name] = sum(found) if found else None
+            complete = complete and len(found) in (0, len(parts))
+        tokens = (
+            None
+            if all(value is None for value in totals.values())
+            else TokenUsage(
+                input=totals["input"],
+                output=totals["output"],
+                fresh=totals["fresh"],
+                cached=totals["cached"],
+                thinking=totals["thinking"],
+            )
+        )
+        return StepUsage(tokens=tokens, cost_usd=sum(costs) if costs else None, complete=complete)
+
+    def close(self) -> None:
+        """After the final read: a lower-bound spend makes the ledger incomplete, a finish
+        without its measure marks it unmeasured, then the step is settled so that the next
+        one starts from it."""
+        if self.unmeasured:
+            self.ledger.unmeasured = True
+        if self.unmeasured or self.in_flight:
+            self.ledger.complete = False
+        self.ledger.settle()
 
 
 def _writable_workspace_may_have_written(events_log: Path, mcp: McpServer | None) -> bool:

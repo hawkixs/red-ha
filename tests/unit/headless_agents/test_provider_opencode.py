@@ -21,6 +21,7 @@ import pytest
 from pydantic import SecretStr
 
 from headless_agents import procgroup
+from headless_agents.budget import Caps, Ledger
 from headless_agents.capability import (
     INVALID_USAGE_EXIT_CODE,
     PROVIDER_FALLBACK_EXIT_CODE,
@@ -29,6 +30,7 @@ from headless_agents.capability import (
 )
 from headless_agents.profile import CapabilityProfile, Credentials, McpServer, Workspace
 from headless_agents.providers import opencode
+from headless_agents.result import TokenUsage
 from headless_agents.spec import RunSpec
 from headless_agents.structured import SchemaError
 
@@ -1445,3 +1447,284 @@ class TestOutputSchema:
             provider.prepare_home(spec)
         assert not run_dir.exists()
         assert list(root.iterdir()) == []
+
+
+# ── budget meter (spec 2026-10-13 usage and budget §3.6) ────────────────────
+
+_NO_COST = object()
+
+
+def _finish(
+    part_id: str,
+    *,
+    input: int = 100,
+    cache_read: int = 0,
+    cost: object = 0.25,
+    tokens: bool = True,
+) -> dict[str, object]:
+    """A ``step_finish`` event as opencode writes it, with its part id."""
+    part: dict[str, object] = {"id": part_id, "type": "step-finish", "reason": "tool-calls"}
+    if tokens:
+        part["tokens"] = {
+            "total": input + cache_read + 10,
+            "input": input,
+            "output": 10,
+            "reasoning": 0,
+            "cache": {"read": cache_read, "write": 0},
+        }
+    if cost is not _NO_COST:
+        part["cost"] = cost
+    return {"type": "step_finish", "part": part}
+
+
+def _start(part_id: str) -> dict[str, object]:
+    return {"type": "step_start", "part": {"id": part_id, "type": "step-start"}}
+
+
+def _append(path: Path, data: str | bytes) -> None:
+    with path.open("ab") as stream:
+        stream.write(data.encode("utf-8") if isinstance(data, str) else data)
+
+
+class TestStepMeter:
+    def test_a_part_re_emitted_across_reads_is_counted_once(self, tmp_path: Path) -> None:
+        log = tmp_path / "events.jsonl"
+        ledger = Ledger(Caps(max_cost=1.0))
+        meter = opencode.StepMeter(ledger)
+        _append(log, _events(_start("s1"), _finish("f1", cost=0.25)))
+        meter.read(log)
+        assert ledger.spent_cost == 0.25
+        _append(log, _events(_finish("f1", cost=0.5)))
+        meter.read(log)
+        assert ledger.spent_cost == 0.5, "the last version wins; never 0.75"
+
+    def test_a_line_split_across_two_reads_waits_for_its_newline(self, tmp_path: Path) -> None:
+        log = tmp_path / "events.jsonl"
+        ledger = Ledger(Caps(max_input_tokens=1000))
+        meter = opencode.StepMeter(ledger)
+        line = _events(_finish("f1", input=600, cache_read=600)).encode()
+        _append(log, line[:40])
+        meter.read(log)
+        assert ledger.spent_input_tokens == 0 and not meter.must_stop
+        _append(log, line[40:])
+        meter.read(log)
+        assert ledger.spent_input_tokens == 1200, "cache reads count as input (D5)"
+        assert ledger.crossed and meter.must_stop
+
+    def test_two_finishes_in_one_read_both_count_and_one_follows_the_crossing(
+        self, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "events.jsonl"
+        ledger = Ledger(Caps(max_cost=0.5))
+        meter = opencode.StepMeter(ledger)
+        _append(log, _events(_finish("f1", cost=0.5), _finish("f2", cost=0.25)))
+        meter.read(log)
+        assert ledger.spent_cost == 0.75
+        assert ledger.steps_after_crossing == 1
+
+    def test_only_the_final_read_takes_an_unterminated_last_line(self, tmp_path: Path) -> None:
+        log = tmp_path / "events.jsonl"
+        ledger = Ledger(Caps(max_cost=0.5))
+        meter = opencode.StepMeter(ledger)
+        _append(log, json.dumps(_finish("f1", cost=0.5)))
+        meter.read(log)
+        assert not ledger.crossed
+        meter.read(log, final=True)
+        assert ledger.crossed and ledger.steps_after_crossing == 0
+
+    @pytest.mark.parametrize(
+        ("caps", "finish"),
+        [
+            (Caps(max_cost=1.0), _finish("f1", cost=_NO_COST)),
+            (Caps(max_cost=1.0), _finish("f1", cost="0.1")),
+            (Caps(max_cost=1.0), _finish("f1", cost=-0.1)),
+            (Caps(max_cost=1.0), _finish("f1", cost=float("nan"))),
+            (Caps(max_cost=1.0), _finish("f1", cost=True)),
+            (Caps(max_cost=1.0), _finish("f1", cost=10**400)),
+            (Caps(max_input_tokens=1000), _finish("f1", tokens=False)),
+            (
+                Caps(max_input_tokens=1000),
+                {"type": "step_finish", "part": {"id": "f1", "tokens": {"input": "many"}}},
+            ),
+            (
+                Caps(max_input_tokens=1000),
+                {"type": "step_finish", "part": {"id": "f1", "tokens": {"input": 10}}},
+            ),
+        ],
+    )
+    def test_absent_malformed_or_partial_usage_under_its_cap_is_unmeasured(
+        self, tmp_path: Path, caps: Caps, finish: dict[str, object]
+    ) -> None:
+        log = tmp_path / "events.jsonl"
+        meter = opencode.StepMeter(Ledger(caps))
+        _append(log, _events(_start("s1"), finish))
+        meter.read(log)
+        assert meter.unmeasured and meter.must_stop
+
+    def test_a_measure_no_cap_needs_may_be_absent(self, tmp_path: Path) -> None:
+        log = tmp_path / "events.jsonl"
+        meter = opencode.StepMeter(Ledger(Caps(max_input_tokens=1000)))
+        _append(log, _events(_finish("f1", cost=_NO_COST)))
+        meter.read(log)
+        assert not meter.unmeasured and meter.ledger.spent_cost is None
+
+    def test_a_measured_zero_is_a_measure(self, tmp_path: Path) -> None:
+        log = tmp_path / "events.jsonl"
+        ledger = Ledger(Caps(max_cost=1.0, max_input_tokens=1000))
+        meter = opencode.StepMeter(ledger)
+        _append(log, _events(_finish("f1", input=0, cache_read=0, cost=0)))
+        meter.read(log)
+        assert not meter.unmeasured and not meter.must_stop
+        assert (ledger.spent_cost, ledger.spent_input_tokens) == (0.0, 0)
+
+    def test_a_valid_finish_then_one_missing_its_measure_keeps_a_lower_bound(
+        self, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "events.jsonl"
+        ledger = Ledger(Caps(max_cost=1.0))
+        meter = opencode.StepMeter(ledger)
+        _append(log, _events(_finish("f1", cost=0.25), _finish("f2", cost=_NO_COST)))
+        meter.read(log, final=True)
+        meter.close()
+        assert meter.unmeasured and ledger.complete is False and ledger.unmeasured
+        assert ledger.record()["spent_cost"] == 0.25
+        assert ledger.record()["overshoot_cost"] is None
+
+    def test_a_start_without_its_finish_is_in_flight_and_leaves_a_lower_bound(
+        self, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "events.jsonl"
+        ledger = Ledger(Caps(max_cost=0.5))
+        meter = opencode.StepMeter(ledger)
+        _append(log, _events(_start("s1"), _finish("f1", cost=0.5), _start("s2")))
+        meter.read(log, final=True)
+        assert meter.in_flight and not meter.unmeasured and ledger.crossed
+        meter.close()
+        assert ledger.record()["spent_complete"] is False
+
+    def test_close_settles_so_the_next_step_starts_from_what_is_left(self, tmp_path: Path) -> None:
+        ledger = Ledger(Caps(max_cost=1.0))
+        first, second = tmp_path / "first.jsonl", tmp_path / "second.jsonl"
+        _append(first, _events(_start("s1"), _finish("f1", cost=0.5)))
+        _append(second, _events(_start("s1"), _finish("f1", cost=0.25)))
+        meter = opencode.StepMeter(ledger)
+        meter.read(first, final=True)
+        meter.close()
+        assert ledger.record()["spent_complete"] is True
+        meter = opencode.StepMeter(ledger)
+        meter.read(second, final=True)
+        meter.close()
+        assert ledger.spent_cost == 0.75 and not ledger.crossed
+
+    def test_an_absent_stream_reads_as_nothing_new(self, tmp_path: Path) -> None:
+        meter = opencode.StepMeter(Ledger(Caps(max_cost=1.0)))
+        meter.read(tmp_path / "absent.jsonl", final=True)
+        assert not meter.must_stop and not meter.in_flight
+
+
+class TestUnfinishedStep:
+    def test_a_start_no_finish_matched_is_unfinished(self, tmp_path: Path) -> None:
+        log = tmp_path / "events.jsonl"
+        log.write_text(_events(_start("s1"), _finish("f1"), _start("s2")), encoding="utf-8")
+        assert opencode.unfinished_step(log) is True
+
+    def test_matched_starts_and_re_emitted_parts_are_finished(self, tmp_path: Path) -> None:
+        log = tmp_path / "events.jsonl"
+        log.write_text(
+            _events(_start("s1"), _start("s1"), _finish("f1"), _finish("f1")), encoding="utf-8"
+        )
+        assert opencode.unfinished_step(log) is False
+        assert opencode.unfinished_step(tmp_path / "absent.jsonl") is False
+
+
+def test_report_text_is_what_extract_report_writes(tmp_path: Path) -> None:
+    log = tmp_path / "events.jsonl"
+    log.write_text(_events(_text("part one", "p1"), _text("part two", "p2")), encoding="utf-8")
+    assert opencode.report_text(log) == "part one\n\npart two"
+    report = tmp_path / "report.log"
+    opencode.extract_report(log, report)
+    assert report.read_text(encoding="utf-8") == opencode.report_text(log)
+
+
+def test_a_cost_too_large_for_a_float_is_no_measure_and_never_raises() -> None:
+    assert opencode.part_cost({"cost": 10**400}) is None
+    assert opencode.part_cost({"cost": 0}) == 0.0
+
+
+class TestStepUsage:
+    """The capped result's usage is the meter's validated one (spec §3.6): it agrees with
+    the ledger, and never carries a non-finite number."""
+
+    def _usage(self, tmp_path: Path, caps: Caps, *events: dict[str, object]) -> opencode.StepUsage:
+        log = tmp_path / "events.jsonl"
+        _append(log, _events(*events))
+        meter = opencode.StepMeter(Ledger(caps))
+        meter.read(log, final=True)
+        meter.close()
+        return meter.usage()
+
+    def test_a_valid_cost_then_a_nan_keeps_the_valid_one_as_a_lower_bound(
+        self, tmp_path: Path
+    ) -> None:
+        usage = self._usage(
+            tmp_path,
+            Caps(max_cost=1.0),
+            _start("s1"),
+            _finish("f1", cost=0.25),
+            _start("s2"),
+            _finish("f2", cost=float("nan")),
+        )
+        assert usage == opencode.StepUsage(
+            tokens=TokenUsage(input=200, output=20, fresh=200, cached=0, thinking=0),
+            cost_usd=0.25,
+            complete=False,
+        )
+
+    def test_a_cost_without_tokens_is_counted(self, tmp_path: Path) -> None:
+        usage = self._usage(
+            tmp_path, Caps(max_cost=1.0), _start("s1"), _finish("f1", cost=0.5, tokens=False)
+        )
+        assert usage == opencode.StepUsage(tokens=None, cost_usd=0.5, complete=True)
+
+    def test_a_measure_some_finishes_lack_is_a_lower_bound(self, tmp_path: Path) -> None:
+        usage = self._usage(
+            tmp_path,
+            Caps(max_cost=1.0),
+            _finish("f1", input=100, cache_read=50, cost=0.25),
+            _finish("f2", cost=0.25, tokens=False),
+        )
+        assert usage == opencode.StepUsage(
+            tokens=TokenUsage(input=150, output=10, fresh=100, cached=50, thinking=0),
+            cost_usd=0.5,
+            complete=False,
+        )
+
+    def test_a_call_in_flight_makes_it_a_lower_bound(self, tmp_path: Path) -> None:
+        usage = self._usage(
+            tmp_path, Caps(max_cost=1.0), _start("s1"), _finish("f1", cost=0.25), _start("s2")
+        )
+        assert usage.complete is False
+
+    def test_a_block_without_output_keeps_its_known_input(self, tmp_path: Path) -> None:
+        no_output = {
+            "type": "step_finish",
+            "part": {"id": "f1", "cost": 0.25, "tokens": {"input": 100, "cache": {"read": 50}}},
+        }
+        usage = self._usage(tmp_path, Caps(max_input_tokens=1000), _start("s1"), no_output)
+        assert usage == opencode.StepUsage(
+            tokens=TokenUsage(input=150, output=None, fresh=100, cached=50, thinking=None),
+            cost_usd=0.25,
+            complete=True,
+        )
+
+    def test_a_token_field_some_finishes_lack_is_a_lower_bound(self, tmp_path: Path) -> None:
+        no_output = {
+            "type": "step_finish",
+            "part": {"id": "f2", "cost": 0.25, "tokens": {"input": 100, "cache": {"read": 0}}},
+        }
+        usage = self._usage(tmp_path, Caps(max_cost=1.0), _finish("f1", cost=0.25), no_output)
+        assert usage == opencode.StepUsage(
+            tokens=TokenUsage(input=200, output=10, fresh=200, cached=0, thinking=0),
+            cost_usd=0.5,
+            complete=False,
+        )
