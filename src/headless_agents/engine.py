@@ -31,6 +31,7 @@ from typing import Final
 
 from . import lineage as lineages
 from . import locks, procgroup, proof_state, retire, review_flow, reviews, structured, write_flow
+from .budget import Caps, cost_cap, input_tokens_cap
 from .capability import scoped_environment
 from .chain import run_chain
 from .cli_models import ModelsError, check_known_model, model_sources_for, models_for
@@ -47,6 +48,7 @@ from .providers.openai_compat import GENERIC_NAME
 from .registry import (
     HTTP_PROVIDER_NAMES,
     PROVIDER_NAMES,
+    cap_refusal,
     get_provider,
     max_prompt_bytes,
     probe,
@@ -146,6 +148,10 @@ class Request:
     #: ``--output-schema FILE``, parsed: the JSON Schema the answer is constrained by
     #: (0.5.3 lot 1); a provider or role target only, every link able to honour it.
     output_schema: Mapping[str, object] | None = None
+    #: ``--max-cost USD`` and ``--max-input-tokens N`` (spec 2026-10-13 usage and budget
+    #: §3.4): run-level caps, not role overrides, so a workflow takes them too.
+    max_cost: float | None = None
+    max_input_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +195,9 @@ class Plan:
     #: The review ``--findings`` names, read from the registry; its result is read by
     #: ``execute``, which composes the fix prompt from it (§3.6).
     findings_from: str | None = None
+    #: The run's one budget (spec 2026-10-13 usage and budget §3.4), admitted on every
+    #: link of every step (§3.5); ``Caps()`` when the run is not capped.
+    caps: Caps = Caps()
 
 
 def operator_environment(environ: Mapping[str, str]) -> dict[str, str]:
@@ -721,6 +730,57 @@ def _plan_workflow(request: Request, workflow: Workflow, config: Config) -> Plan
     )
 
 
+def _request_caps(request: Request) -> Caps:
+    """The caps the command line gives, validated here too: a library caller passes the
+    engine's gates like the CLI (spec 2026-10-13 usage §3.4)."""
+    try:
+        max_cost = cost_cap(request.max_cost) if request.max_cost is not None else None
+    except ValueError as exc:
+        raise UsageError(f"--max-cost {request.max_cost!r}: {exc}") from None
+    try:
+        max_input_tokens = (
+            input_tokens_cap(request.max_input_tokens)
+            if request.max_input_tokens is not None
+            else None
+        )
+    except ValueError as exc:
+        raise UsageError(f"--max-input-tokens {request.max_input_tokens!r}: {exc}") from None
+    return Caps(max_cost=max_cost, max_input_tokens=max_input_tokens)
+
+
+def _capped(planned: Plan) -> Plan:
+    """``planned`` with the run's one budget, admitted (spec 2026-10-13 usage §3.4, §3.5).
+
+    Each cap is the command line's when given, else the smallest value any role of the
+    run sets -- the role, or every slot role of a review -- else none. A cap is refused,
+    before anything is registered or started (D1, D6), when any link of any step runs on
+    a rail that cannot enforce it.
+    """
+    given = _request_caps(planned.request)
+    roles = [slot.role for slot in planned.panel] or [planned.role]
+    caps = Caps(
+        max_cost=(
+            given.max_cost
+            if given.max_cost is not None
+            else min((r.max_cost for r in roles if r.max_cost is not None), default=None)
+        ),
+        max_input_tokens=(
+            given.max_input_tokens
+            if given.max_input_tokens is not None
+            else min(
+                (r.max_input_tokens for r in roles if r.max_input_tokens is not None),
+                default=None,
+            )
+        ),
+    )
+    for role in roles:
+        for provider in role.providers:
+            refusal = cap_refusal(provider, caps)
+            if refusal is not None:
+                raise UsageError(f"role {role.name}, link {provider}: {refusal}; nothing ran")
+    return replace(planned, caps=caps)
+
+
 def plan(request: Request) -> Plan:
     """Resolve ``request`` and apply every gate that needs no git; raise :class:`UsageError`."""
     if request.wait_seconds is not None:
@@ -729,7 +789,7 @@ def plan(request: Request) -> Plan:
     config = load_config(request.environ, request.home)
     workflow = config.workflows.get(request.target)
     if workflow is not None:
-        return _plan_workflow(request, workflow, config)
+        return _capped(_plan_workflow(request, workflow, config))
     _refuse_options_of_other_shapes(request, None)
     declared, profiles = config.roles, config.profiles
     if request.target not in declared and request.target not in PROVIDER_NAMES:
@@ -750,17 +810,19 @@ def plan(request: Request) -> Plan:
     prompt = _prompt(request)
     _check_prompt_size(role, prompt, _bundle(role, request, None))
     mcp = _mcp(role, request)
-    return Plan(
-        request=request,
-        role=role,
-        models=models,
-        model_sources={name: source for name, (_, source) in resolved.items()},
-        prompt=prompt,
-        mcp=mcp,
-        environment=_environment(request.environ, mcp),
-        run_dir=_run_dir(request),
-        state=state_dir(request.environ, home=request.home),
-        task=prompt,
+    return _capped(
+        Plan(
+            request=request,
+            role=role,
+            models=models,
+            model_sources={name: source for name, (_, source) in resolved.items()},
+            prompt=prompt,
+            mcp=mcp,
+            environment=_environment(request.environ, mcp),
+            run_dir=_run_dir(request),
+            state=state_dir(request.environ, home=request.home),
+            task=prompt,
+        )
     )
 
 

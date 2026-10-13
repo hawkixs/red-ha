@@ -38,6 +38,7 @@ from typing import IO, Final
 
 from . import lineage as lineages
 from . import locks, presets, prove, quarantine, show, updaters
+from .budget import cost_cap, input_tokens_cap
 from .capability import INVALID_USAGE_EXIT_CODE
 from .cli_models import MODEL_OPTIONAL, MODELS_FILE_NAME, default_models_path, load_models
 from .config_paths import config_dir, config_file, state_dir
@@ -142,6 +143,26 @@ def _store_true_or_none(parser: argparse.ArgumentParser, *flags: str, help: str)
     parser.add_argument(*flags, action="store_const", const=True, default=None, help=help)
 
 
+def _max_cost(text: str) -> float:
+    """``--max-cost USD`` (spec 2026-10-13 usage and budget §3.4)."""
+    try:
+        return cost_cap(float(text))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: a cost cap is a finite number of USD greater than zero"
+        ) from None
+
+
+def _max_input_tokens(text: str) -> int:
+    """``--max-input-tokens N`` (spec 2026-10-13 usage and budget §3.4)."""
+    try:
+        return input_tokens_cap(int(text))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: an input-token cap is a whole number greater than zero"
+        ) from None
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ha", description="Run a task on any agent provider or declared role."
@@ -226,6 +247,20 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--base-url", help="the endpoint of openai-compat")
     run.add_argument("--key-env", metavar="VAR", help="the key variable of openai-compat")
     run.add_argument("--max-tokens", type=int, metavar="N", help="maximum HTTP answer tokens")
+    run.add_argument(
+        "--max-cost",
+        type=_max_cost,
+        metavar="USD",
+        help="stop the run at the step whose measured cost reaches USD; exit 7, the partial "
+        "answer kept apart (every link must report usage during the run: opencode)",
+    )
+    run.add_argument(
+        "--max-input-tokens",
+        type=_max_input_tokens,
+        metavar="N",
+        help="stop the run at the step whose total input tokens, cache reads included, "
+        "reach N; exit 7, the partial answer kept apart (opencode links only)",
+    )
     run.add_argument("--json", action="store_true", help="print run.json")
     run.add_argument("--run-dir", type=Path, help="the run's directory (must not exist)")
     run.add_argument(
@@ -894,6 +929,8 @@ def _run(args: argparse.Namespace, io: Io) -> int:
         findings_run=args.findings_run,
         wait_seconds=args.wait,
         output_schema=output_schema,
+        max_cost=args.max_cost,
+        max_input_tokens=args.max_input_tokens,
     )
     outcome = execute(plan(request), say=io.say)
     report = outcome.report

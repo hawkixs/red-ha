@@ -510,7 +510,7 @@ uv tool install "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.
 ha run TARGET [PROMPT | -] [-m|--model MODEL] [--effort E] [--timeout SECONDS] [--wait SECONDS]
        [--context full|global|none] [--context-parents] [--mcp PROFILE]
        [--base-url URL --key-env VAR] [--max-tokens N] [--repo PATH] [--json] [--run-dir DIR]
-       [--output-schema FILE]
+       [--output-schema FILE] [--max-cost USD] [--max-input-tokens N]
        [--write [--shell] [--base REF]]
        [--continue RUN_ID] [--findings RUN_ID] [--head REF] [--run RUN_ID]
 ha roles [--json]
