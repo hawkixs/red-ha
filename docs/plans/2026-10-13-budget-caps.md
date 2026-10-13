@@ -21,8 +21,10 @@ a capped panel's members one at a time, and records `budget`, the reasons and th
 never-started steps. On the opencode rail a `StepMeter` reads the event stream
 incrementally at every 0.1 s poll (buffered partial lines, last version of each
 `step_finish` part wins), kills the process group at once (`kill_process_group`, no grace)
-when the spend reaches a cap or a finish lacks its measure, and after a final read decides
-exit 7 / exit 1 from the measured spend only. `RunResult` gains `partial_text`,
+when the spend reaches a cap or a finish lacks its measure, reads once more before the
+group's watcher is released (killing what a leader that already exited left running when
+that read stops the run), and decides exit 7 / exit 1 from the measured spend only. A capped
+`RunResult` carries the meter's validated usage, the ledger's own figures. `RunResult` gains `partial_text`,
 `failure_reason` and `usage_complete`; `run.json` gains the run key `budget` and the step
 keys `partial_answer`, `steps_after_crossing`, `started`, `failure_reason`,
 `usage_complete`; `budget_exhausted` becomes a final status; `ha run` and `ha show`
@@ -59,7 +61,15 @@ the help and the `roles.toml` keys, not only exit 7).
   review's members run sequentially, each in its own seat; uncapped panels keep their
   concurrency). opencode polls every `BUDGET_POLL_SECONDS = 0.1` when capped
   (`QUOTA_POLL_SECONDS = 0.5` otherwise) and kills with `kill_process_group` (SIGKILL to the
-  group, no `TERMINATION_GRACE_SECONDS`). Reaching a cap is enough (`>=`).
+  group, no `TERMINATION_GRACE_SECONDS`). Reaching a cap is enough (`>=`). The final read
+  happens before the watcher is released; a stop it finds kills the surviving group too.
+  No later step, member or judge starts once the LEDGER has crossed a cap or seen an
+  unmeasured finish, whatever the displayed reason of the step (a tripwire clears it).
+- **Validated usage.** A capped `RunResult`'s `tokens`, `cost_usd` and `usage_complete`
+  come from the meter, from validated values only (a cost is a finite number `>= 0`, an int
+  too large for a float is no cost; tokens need non-negative integer input, cache reads and
+  output), never a `NaN` or an infinity in `result.json`, `run.json` or the summary line; a
+  cost reported without tokens counts. Uncapped runs keep `telemetry()`'s tolerant reading.
 - **D7/A1 outcome.** A step whose measured spend after the final read reached a cap exits
   `7` (`capability.BUDGET_EXIT_CODE`), `failure_reason: "budget_exhausted"`, whoever ended
   the child; its stream text is `RunResult.partial_text`, never `text`. A capped finish
@@ -97,15 +107,17 @@ the help and the `roles.toml` keys, not only exit 7).
   (a real child re-emitting across two polls).
 - **A crossing the meter sees only after the child already exited** (the child wrote its
   last finish and exited inside one poll): the outcome must still be exit 7 with the same
-  record as a killed child, never a success. Pinned in Task 7 (`_FakeProcess` that exits
-  in its first wait; own exit vs kill at the same spend).
+  record as a killed child, never a success, and whatever the leader left running in its
+  group must die. Pinned in Task 7 (a leader that exits at once leaving a sleeping
+  descendant; own exit vs kill at the same spend).
 - **A measured zero next to an absent measure**: `cost: 0` is a measure and never stops a
   run; an absent cost stops a `--max-cost` run but not a `--max-input-tokens`-only run.
   Pinned in Task 6.
 - **A never-started step in the run totals**: it spent nothing, so it must not turn the
   totals incomplete, while a refused step (exit 2) still does (PR1). Pinned in Task 4.
 - **A tripwire on a step that also crossed its cap**: the tripwire's exit 1 and reason win;
-  no `budget_exhausted`, no partial answer. Pinned in Task 7 (rail) and Task 10 (write).
+  no `budget_exhausted`, no partial answer — yet the ledger's crossing still starts no
+  later panel member or judge. Pinned in Task 7 (rail), Task 9 (panel) and Task 10 (write).
 
 ## Plan decisions where the spec is silent (for the operator)
 
@@ -120,13 +132,11 @@ the help and the `roles.toml` keys, not only exit 7).
   missing measure only makes the record a lower bound, as §3.6 rules for a call in flight.
 - **What a "partial" usage is:** under `--max-input-tokens` a finish needs `tokens.input`
   and `tokens.cache.read` as non-negative integers; under `--max-cost` a non-negative
-  finite `cost`. A measure no cap watches may be absent.
+  finite `cost`. A measure no cap watches may be absent; the step's usage is then complete
+  only when each measure is reported by every finished part or by none.
 - **`spent_*` of an unwatched measure:** `spent_cost` on a tokens-only budget is the
   reported cost sum, `null` when no step reported one (never `0`); likewise
   `spent_input_tokens` on a cost-only budget.
-- **A write stopped on its cap prints its header** (run id, branch, diffstat, patch) on
-  stdout, as every failed write does today; no answer text goes there. §3.6's "nothing on
-  stdout" is met by the read run and the review.
 - **`RunResult`'s new fields stay out of `result.json`** (`to_dict` unchanged): the step
   entry of `run.json` carries them.
 
@@ -165,7 +175,7 @@ the help and the `roles.toml` keys, not only exit 7).
   - `BUDGET_EXHAUSTED: Final = "budget_exhausted"`, `BUDGET_UNMEASURED: Final = "budget_unmeasured"`, `BUDGET_REASONS: Final = frozenset({...})`
   - `cost_cap(value: object) -> float` and `input_tokens_cap(value: object) -> int` (both raise `ValueError` with the rule as message)
   - `@dataclass(frozen=True) class Caps` with `max_cost: float | None = None`, `max_input_tokens: int | None = None`, `capped -> bool` (property), `describe() -> str`
-  - `@dataclass class Ledger(caps: Caps)` with `complete: bool = True`, `steps_after_crossing: int | None = None`, properties `spent_cost -> float | None`, `spent_input_tokens -> int | None`, `crossed -> bool`, methods `measure(*, cost: float | None, input_tokens: int | None) -> None`, `settle() -> None`, `record() -> dict[str, object]`
+  - `@dataclass class Ledger(caps: Caps)` with `complete: bool = True`, `unmeasured: bool = False`, `steps_after_crossing: int | None = None`, properties `spent_cost -> float | None`, `spent_input_tokens -> int | None`, `crossed -> bool`, methods `measure(*, cost: float | None, input_tokens: int | None) -> None`, `settle() -> None`, `record() -> dict[str, object]`
   - `capability.BUDGET_EXIT_CODE = 7`, `capability.KILL_REAP_SECONDS = 1.0`, `capability.kill_process_group(process: subprocess.Popen[str]) -> None`
 
 - [ ] **Step 1: Write the failing tests** — create `tests/unit/headless_agents/test_budget.py`:
@@ -241,7 +251,9 @@ def test_caps_say_whether_the_run_is_capped_and_name_themselves() -> None:
 
 
 def test_a_capped_run_that_spent_nothing_records_zero_and_no_overshoot() -> None:
-    record = Ledger(Caps(max_input_tokens=1000)).record()
+    ledger = Ledger(Caps(max_input_tokens=1000))
+    assert (ledger.complete, ledger.unmeasured, ledger.crossed) == (True, False, False)
+    record = ledger.record()
     assert set(record) == BUDGET_KEYS
     assert record == {
         "max_cost": None,
@@ -457,12 +469,15 @@ class Ledger:
     A capped measure starts at zero; a measure no cap watches stays ``None`` until a
     step reports it (absent is not zero). ``complete`` turns false, for good, when a
     step's spend is only a lower bound (a finish without the measure, a call killed in
-    flight). ``steps_after_crossing`` is ``None`` until the spend reaches a cap, then
-    counts the ``step_finish`` parts the meter saw after the one that crossed.
+    flight). ``unmeasured`` turns true, for good, when a finished call lacked the measure
+    a cap needs: what is left is unknowable, so no later step may start.
+    ``steps_after_crossing`` is ``None`` until the spend reaches a cap, then counts the
+    ``step_finish`` parts the meter saw after the one that crossed.
     """
 
     caps: Caps
     complete: bool = True
+    unmeasured: bool = False
     steps_after_crossing: int | None = None
     _settled_cost: float | None = field(default=None, init=False)
     _settled_input: int | None = field(default=None, init=False)
@@ -1828,7 +1843,7 @@ git commit -m "✨ feat(show): record budget_exhausted and show the budget and l
 - Modify: `src/headless_agents/providers/opencode.py` — imports (69-110), `extract_report`
   (576-598, its body moves to a new `report_text`), after `telemetry` (679-711): new
   `_step_key`, `unfinished_step`, `_non_negative`, `_token_count`, `part_cost`,
-  `part_input_tokens`, `StepMeter`
+  `part_input_tokens`, `_part_tokens`, `StepUsage`, `StepMeter`
 - Test: `tests/unit/headless_agents/test_provider_opencode.py` (imports 23, append after 1447)
 
 **Interfaces:**
@@ -1837,11 +1852,14 @@ git commit -m "✨ feat(show): record budget_exhausted and show the budget and l
   - `report_text(events_log: Path) -> str` (`extract_report` writes it, unchanged behaviour)
   - `unfinished_step(events_log: Path) -> bool`
   - `part_cost(part: Mapping[str, object]) -> float | None`, `part_input_tokens(part: Mapping[str, object]) -> int | None`
-  - `class StepMeter(ledger: Ledger)` with `ledger`, `read(events_log: Path, *, final: bool = False) -> None`, properties `unmeasured`, `in_flight`, `must_stop` (all `bool`), `close() -> None`
+  - `part_cost` never raises: an absent, malformed, negative or non-finite cost, or an int too large for a float (`10**400`), is `None`
+  - `@dataclass(frozen=True) class StepUsage` with `tokens: TokenUsage | None`, `cost_usd: float | None`, `complete: bool`
+  - `class StepMeter(ledger: Ledger)` with `ledger`, `read(events_log: Path, *, final: bool = False) -> None`, properties `unmeasured`, `in_flight`, `must_stop` (all `bool`), `usage() -> StepUsage`, `close() -> None` (sets `ledger.unmeasured` and `ledger.complete`, then settles)
 
 - [ ] **Step 1: Write the failing tests.** In `test_provider_opencode.py` add `from
   headless_agents.budget import Caps, Ledger` right after `from headless_agents import
-  procgroup`; append at the end:
+  procgroup`, and `from headless_agents.result import TokenUsage` right after `from
+  headless_agents.providers import opencode`; append at the end:
 
 ```python
 # ── budget meter (spec 2026-10-13 usage and budget §3.6) ────────────────────
@@ -1935,6 +1953,7 @@ class TestStepMeter:
             (Caps(max_cost=1.0), _finish("f1", cost=-0.1)),
             (Caps(max_cost=1.0), _finish("f1", cost=float("nan"))),
             (Caps(max_cost=1.0), _finish("f1", cost=True)),
+            (Caps(max_cost=1.0), _finish("f1", cost=10**400)),
             (Caps(max_input_tokens=1000), _finish("f1", tokens=False)),
             (
                 Caps(max_input_tokens=1000),
@@ -1980,7 +1999,7 @@ class TestStepMeter:
         _append(log, _events(_finish("f1", cost=0.25), _finish("f2", cost=_NO_COST)))
         meter.read(log, final=True)
         meter.close()
-        assert meter.unmeasured and ledger.complete is False
+        assert meter.unmeasured and ledger.complete is False and ledger.unmeasured
         assert ledger.record()["spent_cost"] == 0.25
         assert ledger.record()["overshoot_cost"] is None
 
@@ -2038,15 +2057,77 @@ def test_report_text_is_what_extract_report_writes(tmp_path: Path) -> None:
     report = tmp_path / "report.log"
     opencode.extract_report(log, report)
     assert report.read_text(encoding="utf-8") == opencode.report_text(log)
+
+
+def test_a_cost_too_large_for_a_float_is_no_measure_and_never_raises() -> None:
+    assert opencode.part_cost({"cost": 10**400}) is None
+    assert opencode.part_cost({"cost": 0}) == 0.0
+
+
+class TestStepUsage:
+    """The capped result's usage is the meter's validated one (spec §3.6): it agrees with
+    the ledger, and never carries a non-finite number."""
+
+    def _usage(self, tmp_path: Path, caps: Caps, *events: dict[str, object]) -> opencode.StepUsage:
+        log = tmp_path / "events.jsonl"
+        _append(log, _events(*events))
+        meter = opencode.StepMeter(Ledger(caps))
+        meter.read(log, final=True)
+        meter.close()
+        return meter.usage()
+
+    def test_a_valid_cost_then_a_nan_keeps_the_valid_one_as_a_lower_bound(
+        self, tmp_path: Path
+    ) -> None:
+        usage = self._usage(
+            tmp_path,
+            Caps(max_cost=1.0),
+            _start("s1"),
+            _finish("f1", cost=0.25),
+            _start("s2"),
+            _finish("f2", cost=float("nan")),
+        )
+        assert usage == opencode.StepUsage(
+            tokens=TokenUsage(input=200, output=20, fresh=200, cached=0, thinking=0),
+            cost_usd=0.25,
+            complete=False,
+        )
+
+    def test_a_cost_without_tokens_is_counted(self, tmp_path: Path) -> None:
+        usage = self._usage(
+            tmp_path, Caps(max_cost=1.0), _start("s1"), _finish("f1", cost=0.5, tokens=False)
+        )
+        assert usage == opencode.StepUsage(tokens=None, cost_usd=0.5, complete=True)
+
+    def test_a_measure_some_finishes_lack_is_a_lower_bound(self, tmp_path: Path) -> None:
+        usage = self._usage(
+            tmp_path,
+            Caps(max_cost=1.0),
+            _finish("f1", input=100, cache_read=50, cost=0.25),
+            _finish("f2", cost=0.25, tokens=False),
+        )
+        assert usage == opencode.StepUsage(
+            tokens=TokenUsage(input=150, output=10, fresh=100, cached=50, thinking=0),
+            cost_usd=0.5,
+            complete=False,
+        )
+
+    def test_a_call_in_flight_makes_it_a_lower_bound(self, tmp_path: Path) -> None:
+        usage = self._usage(
+            tmp_path, Caps(max_cost=1.0), _start("s1"), _finish("f1", cost=0.25), _start("s2")
+        )
+        assert usage.complete is False
 ```
 
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/unit/headless_agents/test_provider_opencode.py -q`
-Expected: 21 FAIL with `AttributeError: module 'headless_agents.providers.opencode' has no
-attribute 'StepMeter'` (`'unfinished_step'`, `'report_text'`); every existing test passes.
+Expected: 27 FAIL with `AttributeError: module 'headless_agents.providers.opencode' has no
+attribute 'StepMeter'` (`'unfinished_step'`, `'report_text'`, `'part_cost'`, `'StepUsage'`);
+every existing test passes.
 
-- [ ] **Step 3: Implement.** Add `import math` after `import json`, and `from ..budget
+- [ ] **Step 3: Implement.** Add `import math` after `import json`, `from dataclasses
+  import dataclass` after `from collections.abc import Callable, Mapping`, and `from ..budget
   import Ledger` before `from ..capability import (`. `extract_report` keeps its docstring
   and its body becomes a call to the new `report_text`, which takes the loop it had:
 
@@ -2107,9 +2188,13 @@ def unfinished_step(events_log: Path) -> bool:
 
 
 def _non_negative(value: object) -> float | None:
+    """A finite number ``>= 0``, else ``None``: an int too large for a float is no measure."""
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
     return number if math.isfinite(number) and number >= 0 else None
 
 
@@ -2136,6 +2221,38 @@ def part_input_tokens(part: Mapping[str, object]) -> int | None:
     if fresh is None or read is None:
         return None
     return fresh + read
+
+
+def _part_tokens(part: Mapping[str, object]) -> TokenUsage | None:
+    """A ``step_finish`` part's tokens, normalised as :func:`telemetry` does, or ``None``
+    unless its input, cache reads and output are all non-negative integers."""
+    tokens = part.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+    cache = tokens.get("cache")
+    fresh = _token_count(tokens.get("input"))
+    read = _token_count(cache.get("read")) if isinstance(cache, dict) else None
+    output = _token_count(tokens.get("output"))
+    if fresh is None or read is None or output is None:
+        return None
+    return TokenUsage(
+        input=fresh + read,
+        output=output,
+        fresh=fresh,
+        cached=read,
+        thinking=_token_count(tokens.get("reasoning")),
+    )
+
+
+@dataclass(frozen=True)
+class StepUsage:
+    """A capped step's usage from the parts its meter validated (spec 2026-10-13 usage
+    §3.6): the figures its ``RunResult`` and the ledger agree on. ``complete`` is false
+    when they are only a lower bound."""
+
+    tokens: TokenUsage | None
+    cost_usd: float | None
+    complete: bool
 
 
 class StepMeter:
@@ -2225,9 +2342,37 @@ class StepMeter:
     def must_stop(self) -> bool:
         return self.ledger.crossed or self.unmeasured
 
+    def usage(self) -> StepUsage:
+        """The step's usage, summed from validated values only: an absent, malformed or
+        non-finite value is never summed (never a ``NaN`` in ``run.json``). Complete when
+        no call is in flight, no finish lacks what a cap needs, and each measure is
+        reported by every finished part or by none."""
+        parts = list(self._finishes.values())
+        costs = [cost for cost in (part_cost(part) for part in parts) if cost is not None]
+        counted = [found for found in (_part_tokens(part) for part in parts) if found is not None]
+        tokens: TokenUsage | None = None
+        if counted:
+            thinking = [usage.thinking for usage in counted if usage.thinking is not None]
+            tokens = TokenUsage(
+                input=sum(usage.input or 0 for usage in counted),
+                output=sum(usage.output or 0 for usage in counted),
+                fresh=sum(usage.fresh or 0 for usage in counted),
+                cached=sum(usage.cached or 0 for usage in counted),
+                thinking=sum(thinking) if thinking else None,
+            )
+        complete = (
+            not self.in_flight
+            and not self.unmeasured
+            and all(len(found) in (0, len(parts)) for found in (costs, counted))
+        )
+        return StepUsage(tokens=tokens, cost_usd=sum(costs) if costs else None, complete=complete)
+
     def close(self) -> None:
-        """After the final read: a lower-bound spend makes the ledger incomplete, then the
-        step is settled so that the next one starts from it."""
+        """After the final read: a lower-bound spend makes the ledger incomplete, a finish
+        without its measure marks it unmeasured, then the step is settled so that the next
+        one starts from it."""
+        if self.unmeasured:
+            self.ledger.unmeasured = True
         if self.unmeasured or self.in_flight:
             self.ledger.complete = False
         self.ledger.settle()
@@ -2265,6 +2410,7 @@ git commit -m "✨ feat(opencode): meter a step's usage incrementally into the r
   `kill_process_group` (Task 1); the `RunResult` fields (Task 4).
 - Produces:
   - `RunSpec.budget: Ledger | None = None` (last field)
+  - a capped `RunResult` carries `meter.usage()` (`tokens`, `cost_usd`, `usage_complete`); an uncapped one `telemetry()` and `not unfinished_step(...)`
   - `opencode.BUDGET_POLL_SECONDS: Final = 0.1`
   - `run_opencode(..., meter: StepMeter | None = None) -> int` (returns `BUDGET_EXIT_CODE` or `1` on a budget stop)
   - `OpenCodeProvider.run` fills `RunResult.partial_text`, `failure_reason`, `usage_complete`
@@ -2293,14 +2439,18 @@ def _paced_opencode_script(
     ignore_sigterm: bool = False,
     pid_file: Path | None = None,
     name: str = "opencode",
+    prelude: str | None = None,
 ) -> Path:
     """A REAL child writing its stream over time: each chunk is printed, then the script
     sleeps for its delay; ``then`` ends it (``exit 0``, or a long ``sleep`` that only a
-    kill ends). ``ignore_sigterm`` makes a graceful termination wait its whole grace."""
+    kill ends). ``ignore_sigterm`` makes a graceful termination wait its whole grace;
+    ``prelude`` runs first (a descendant left in the group, say)."""
     script = tmp_path / name
     lines = ["#!/usr/bin/env bash"]
     if ignore_sigterm:
         lines.append("trap '' TERM")
+    if prelude is not None:
+        lines.append(prelude)
     if pid_file is not None:
         lines.append(f"echo $$ > {shlex.quote(str(pid_file))}")
     for text, delay in chunks:
@@ -2405,20 +2555,26 @@ class TestBudgetEnforcement:
         assert records[0] == records[1]
         assert records[0][0]["overshoot_input_tokens"] == 200
 
-    def test_a_crossing_found_only_by_the_final_read_exits_7(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    @pytest.mark.parametrize(
+        ("finish", "code"),
+        [(_finish("f1", cost=0.5), BUDGET_EXIT_CODE), (_finish("f1", cost=_NO_COST), 1)],
+    )
+    def test_a_stop_found_after_the_leader_exited_kills_what_it_left_running(
+        self, tmp_path: Path, finish: dict[str, object], code: int
     ) -> None:
-        # The fake writes its whole stream and exits inside its first wait: no poll ran.
-        _install(
-            monkeypatch,
-            _FakeProcess(returncode=0, events=_events(_text("REPORT"), _finish("f1", cost=0.5))),
+        # The leader leaves a sleeping descendant in its group, writes the finish that stops
+        # the run and exits at once: the final read finds it after the leader is gone.
+        descendant = tmp_path / "descendant.pid"
+        script = _paced_opencode_script(
+            tmp_path,
+            (_events(_start("s1"), _text("so far"), finish), 0),
+            then="exit 0",
+            prelude=f"sleep 30 & echo $! > {shlex.quote(str(descendant))}",
         )
-        monkeypatch.setattr(
-            opencode, "kill_process_group", lambda process: pytest.fail("nothing to kill")
-        )
-        ledger = Ledger(Caps(max_cost=0.5))
-        code = _run(tmp_path, profile=_profile(mcp=None), meter=opencode.StepMeter(ledger))
-        assert code == BUDGET_EXIT_CODE and ledger.crossed
+        returned, ledger, _ = _capped_run(tmp_path, script, Caps(max_cost=0.5))
+        assert returned == code
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(descendant.read_text().strip()), 0)
 
     def test_a_capped_run_polls_every_tenth_of_a_second(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2463,6 +2619,26 @@ class TestBudgetEnforcement:
         assert ledger.record()["spent_complete"] is False
         stderr = (tmp_path / "out" / "stderr.log").read_text(encoding="utf-8")
         assert "reported no usage for the run's budget (max_cost 1 USD)" in stderr
+
+    def test_a_cost_too_large_for_a_float_stops_the_run_unmeasured(self, tmp_path: Path) -> None:
+        later = tmp_path / "later"
+        script = _paced_opencode_script(
+            tmp_path,
+            (_events(_start("s1"), _finish("f1", cost=0.25), _finish("f2", cost=10**400)), 0.5),
+            then=f"touch {shlex.quote(str(later))}; sleep 30",
+        )
+        code, ledger, elapsed = _capped_run(tmp_path, script, Caps(max_cost=1.0))
+        assert code == 1 and elapsed < 3.0
+        assert not later.exists(), "the child went on after the unmeasured finish"
+        assert ledger.unmeasured and ledger.record() == {
+            "max_cost": 1.0,
+            "max_input_tokens": None,
+            "spent_cost": 0.25,
+            "spent_input_tokens": 200,
+            "spent_complete": False,
+            "overshoot_cost": None,
+            "overshoot_input_tokens": None,
+        }
 
     def test_a_measured_zero_is_no_reason_to_stop(self, tmp_path: Path) -> None:
         script = _paced_opencode_script(
@@ -2590,6 +2766,45 @@ class TestBudgetResult:
         monkeypatch.setattr(opencode, "settle_run", lambda tripwire, code, log: (1, (".git/HEAD",)))
         result = opencode.OpenCodeProvider().run(self._spec(tmp_path, Ledger(Caps(max_cost=0.5))))
         assert (result.exit_code, result.failure_reason, result.partial_text) == (1, None, None)
+
+    def test_a_capped_result_carries_the_meters_validated_usage_never_a_nan(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(
+            _start("s1"), _finish("f1", cost=0.25), _start("s2"), _finish("f2", cost=float("nan"))
+        )
+        fake_run, _ = _metered_fake(events, 1)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, Ledger(Caps(max_cost=1.0))))
+        assert (result.exit_code, result.failure_reason) == (1, "budget_unmeasured")
+        assert (result.cost_usd, result.usage_complete) == (0.25, False)
+        assert result.tokens == TokenUsage(input=200, output=20, fresh=200, cached=0, thinking=0)
+        assert "NaN" not in (tmp_path / "runs" / "r1" / "result.json").read_text()
+
+    def test_a_cost_reported_without_tokens_is_the_results_cost(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(_start("s1"), _text("REPORT"), _finish("f1", cost=0.5, tokens=False))
+        fake_run, _ = _metered_fake(events, 0)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, Ledger(Caps(max_cost=1.0))))
+        assert (result.exit_code, result.tokens, result.cost_usd) == (0, None, 0.5)
+        assert result.usage_complete is True
+
+    def test_a_cost_too_large_for_a_float_never_raises_in_a_capped_result(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(_start("s1"), _finish("f1", cost=0.25), _finish("f2", cost=10**400))
+        fake_run, _ = _metered_fake(events, 1)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        ledger = Ledger(Caps(max_cost=1.0))
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, ledger))
+        assert (result.exit_code, result.failure_reason, result.cost_usd) == (
+            1,
+            "budget_unmeasured",
+            0.25,
+        )
+        assert ledger.record()["overshoot_cost"] is None
 ```
 
 - [ ] **Step 2: Run them to see them fail**
@@ -2695,14 +2910,28 @@ BUDGET_POLL_SECONDS: Final = 0.1
                         exhausted, quota_offset = _quota_exhausted(stderr_log, quota_offset)
 ```
 
+  After the `while True:` loop, still inside its `try:` (so BEFORE the `finally:` that
+  releases the watcher), the final read; a stop it finds kills whatever the leader, already
+  exited, left running in its group:
+
+```python
+                if meter is not None:
+                    # The final read comes BEFORE the watcher is released: a crossing or
+                    # an unmeasured finish found only now -- the leader already exited --
+                    # still kills whatever it left running in its group (spec 2026-10-13
+                    # usage §3.6).
+                    meter.read(events_log, final=True)
+                    if meter.must_stop:
+                        kill_process_group(process)
+```
+
   Right after the `with (events_log.open(...) ..., stderr_log.open(...) ...)` block and
-  before `if quota_hit:`:
+  before `if quota_hit:`, the outcome:
 
 ```python
         if meter is not None:
             # The outcome depends on the measured spend only, never on whether ha's kill
             # or the child's own exit came first (spec 2026-10-13 usage §3.6).
-            meter.read(events_log, final=True)
             meter.close()
             if meter.ledger.crossed:
                 with stderr_log.open("a", encoding="utf-8") as stderr_stream:
@@ -2728,9 +2957,18 @@ BUDGET_POLL_SECONDS: Final = 0.1
         meter = StepMeter(spec.budget) if spec.budget is not None else None
 ```
 
-  then, after `tokens, cost = telemetry(spec.events_log)`:
+  then `tokens, cost = telemetry(spec.events_log)` becomes, up to the `return record(`:
 
 ```python
+        if meter is not None:
+            # A capped result carries the usage its meter validated: the ledger's own
+            # figures, never a non-finite one (spec 2026-10-13 usage §3.6). Uncapped runs
+            # keep the tolerant reading.
+            metered = meter.usage()
+            tokens, cost, usage_complete = metered.tokens, metered.cost_usd, metered.complete
+        else:
+            tokens, cost = telemetry(spec.events_log)
+            usage_complete = not unfinished_step(spec.events_log)
         failure_reason: str | None = None
         partial_text: str | None = None
         if meter is not None and not git_tampered:
@@ -2740,9 +2978,6 @@ BUDGET_POLL_SECONDS: Final = 0.1
                 partial_text = report_text(spec.events_log) or None
             elif exit_code == 1 and meter.unmeasured:
                 failure_reason = BUDGET_UNMEASURED
-        usage_complete = not unfinished_step(spec.events_log) and not (
-            meter is not None and meter.unmeasured
-        )
 ```
 
   and the `RunResult(...)` passed to `record` ends:
@@ -2795,7 +3030,10 @@ git commit -m "✨ feat(opencode): stop a capped run at the step that reaches it
 - [ ] **Step 1: Write the failing tests.** In `test_engine_execute.py`, the first import
   becomes `from headless_agents import cli, engine, locks, proof_state, registry`, followed
   by `from headless_agents.budget import BUDGET_EXHAUSTED, BUDGET_UNMEASURED, Ledger` and
-  `from headless_agents.capability import BUDGET_EXIT_CODE`. Append at the end:
+  `from headless_agents.capability import BUDGET_EXIT_CODE`; add `from
+  headless_agents.providers import opencode` after the `headless_agents.proofs` import. The
+  last two tests run the REAL opencode rail over a stand-in process, end to end through
+  `ha run --json` and its summary line. Append at the end:
 
 ```python
 # ── budget caps (spec 2026-10-13 usage and budget §3.6) ─────────────────────
@@ -2977,15 +3215,91 @@ def test_ha_run_json_carries_the_partial_in_its_step(world: World) -> None:
     report = json.loads(out)
     assert report["steps"][0]["partial_answer"] == "half of an answer"
     assert report["text"] is None and "partial answer follows" not in err
+
+
+def _finish_event(part_id: str, cost: object, tokens: bool = True) -> dict[str, object]:
+    part: dict[str, object] = {"id": part_id, "type": "step-finish", "cost": cost}
+    if tokens:
+        part["tokens"] = {"input": 100, "output": 10, "reasoning": 0, "cache": {"read": 0}}
+    return {"type": "step_finish", "part": part}
+
+
+def _metered_opencode(
+    monkeypatch: pytest.MonkeyPatch, events: list[dict[str, object]], code: int
+) -> opencode.OpenCodeProvider:
+    """The real opencode rail over a stand-in process: it writes ``events`` and meters them
+    as ``run_opencode`` does once its child exited."""
+
+    def fake_run(**kwargs: object) -> int:
+        events_log = kwargs["events_log"]
+        assert isinstance(events_log, Path)
+        events_log.parent.mkdir(parents=True, exist_ok=True)
+        events_log.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+        meter = kwargs["meter"]
+        if isinstance(meter, opencode.StepMeter):
+            meter.read(events_log, final=True)
+            meter.close()
+        return code
+
+    monkeypatch.setattr(opencode, "run_opencode", fake_run)
+    return opencode.OpenCodeProvider()
+
+
+def test_a_nan_cost_never_reaches_the_record_and_the_valid_spend_is_a_lower_bound(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = [
+        {"type": "step_start", "part": {"id": "s1"}},
+        _finish_event("f1", 0.25),
+        {"type": "step_start", "part": {"id": "s2"}},
+        _finish_event("f2", float("nan")),
+    ]
+    world.fakes["opencode"] = _metered_opencode(monkeypatch, events, 1)  # type: ignore[assignment]
+    code, out, err = _cli_run(world, "run", "opencode", "--max-cost", "1", "--json", "task")
+    assert code == 1 and "NaN" not in out
+    report = json.loads(out)
+    assert (report["failure_reason"], report["steps"][0]["cost_usd"]) == ("budget_unmeasured", 0.25)
+    assert (report["cost_usd"], report["cost_complete"], report["tokens_complete"]) == (
+        0.25,
+        False,
+        False,
+    )
+    budget = report["budget"]
+    assert (budget["spent_cost"], budget["spent_complete"], budget["overshoot_cost"]) == (
+        0.25,
+        False,
+        None,
+    )
+    summary = f"ha: run {report['run_id']}: exit 1, "
+    rest = "cost ≥ 0.25 USD (incomplete), input ≥ 200 (cached ≥ 0), output ≥ 20 (incomplete)\n"
+    assert summary + rest in err
+
+
+def test_a_cost_reported_without_tokens_reaches_the_record(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = [
+        {"type": "step_start", "part": {"id": "s1"}},
+        _finish_event("f1", 0.5, tokens=False),
+    ]
+    world.fakes["opencode"] = _metered_opencode(monkeypatch, events, 0)  # type: ignore[assignment]
+    code, out, err = _cli_run(world, "run", "opencode", "--max-cost", "1", "--json", "task")
+    assert code == 0
+    report = json.loads(out)
+    assert (report["cost_usd"], report["cost_complete"]) == (0.5, True)
+    assert (report["tokens"], report["tokens_complete"]) == (None, False)
+    assert report["budget"]["spent_cost"] == 0.5 and report["budget"]["overshoot_cost"] == 0.0
+    assert f"ha: run {report['run_id']}: exit 0, cost 0.5 USD\n" in err
 ```
 
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/unit/headless_agents/test_engine_execute.py -q`
-Expected: 7 FAIL — the spender gets `spec.budget is None`, so the ledger tests fail on
+Expected: 9 FAIL — the spender gets `spec.budget is None`, so the ledger tests fail on
 `isinstance(spec.budget, Ledger)`, `0 == 7` or a `budget` of `None`; the unmeasured test on
 `('failed', None) == ('failed', 'budget_unmeasured')`; the CLI tests on the exit code and
-the missing labelled partial.
+the missing labelled partial; the two real-rail tests on `NaN` in the `--json` output and
+on a `cost_usd` of `None` (uncapped, the rail reads `telemetry()`).
 
 - [ ] **Step 3: Implement.** In `engine.py` the budget import becomes `from .budget import
   BUDGET_EXHAUSTED, Caps, Ledger, cost_cap, input_tokens_cap`. `_spec_for` gains the
@@ -3125,8 +3439,9 @@ git commit -m "✨ feat(engine): run a capped role on one ledger and record its 
 **Interfaces:**
 - Consumes: `ledger` in `execute`, `_crossing`, `_budget` (Task 8); `skipped_step_entry`
   (Task 4); `BUDGET_REASONS`, `BUDGET_EXHAUSTED`, `BUDGET_EXIT_CODE` (Task 1).
-- Produces: `_run_phase(..., ledger: Ledger | None = None) -> _Phase` (sequential when
-  capped; `_Phase.results` holds `None` for a never-started step);
+- Produces: `_budget_stop(ledger: Ledger, result: RunResult) -> str | None`;
+  `_Phase.stopped: str | None = None`; `_run_phase(..., ledger: Ledger | None = None) ->
+  _Phase` (sequential when capped; `_Phase.results` holds `None` for a never-started step);
   `_execute_review(..., ledger: Ledger | None = None) -> Outcome`.
 
 - [ ] **Step 1: Write the failing tests.** In `test_review.py` add, after the
@@ -3161,11 +3476,14 @@ class _PanelSpender:
     """opencode under a cap, call after call: call ``i`` charges ``costs[i]`` to the run's
     ledger, writes its seat's ``events.jsonl`` and ``stderr.log``, and stops with exit 7
     and a partial once the run's spend reaches the cap. ``unmeasured_call`` stands for a
-    finish without the measure its cap needs. ``most_active`` counts overlapping calls."""
+    finish without the measure its cap needs; ``tamper_call`` for a call whose tripwire
+    fired, which the rail reports as a plain exit 1 without any budget reason or partial,
+    whatever it spent. ``most_active`` counts overlapping calls."""
 
     name: str
     costs: list[float]
     unmeasured_call: int | None = None
+    tamper_call: int | None = None
     specs: list[RunSpec] = field(default_factory=list)
     active: int = 0
     most_active: int = 0
@@ -3184,6 +3502,7 @@ class _PanelSpender:
                 unmeasured = call == self.unmeasured_call
                 if unmeasured:
                     ledger.complete = False
+                    ledger.unmeasured = True
                 ledger.settle()
                 crossed = ledger.crossed
             spec = spec.with_run_dir_defaults()
@@ -3194,7 +3513,9 @@ class _PanelSpender:
             judging = "Judge the reviews below" in spec.prompt
             answer = "One reviewer is right.\nVERDICT: APPROVE" if judging else APPROVE
             code, reason = 0, None
-            if crossed:
+            if call == self.tamper_call:
+                code, crossed = 1, False
+            elif crossed:
                 code, reason = BUDGET_EXIT_CODE, BUDGET_EXHAUSTED
             elif unmeasured:
                 code, reason = 1, BUDGET_UNMEASURED
@@ -3321,23 +3642,86 @@ def test_ha_show_prints_the_members_partial_and_no_verdict(world: World) -> None
     assert "partial of call 0" in lines
     assert "step    review oc-b: not started, budget_exhausted" in lines
     assert not any("VERDICT" in line for line in lines)
+
+
+def test_a_member_whose_tripwire_fired_after_crossing_the_cap_starts_nothing_more(
+    world: World,
+) -> None:
+    """The tripwire keeps its exit 1 and reason; the ledger's crossing still stops the panel."""
+    spender = _oc_panel(world, 1.5, 0.25, 0.25)
+    spender.tamper_call = 0
+    outcome = world.review("oc-panel", max_cost=1.0)
+    assert len(spender.specs) == 1, "a member started after the cap was crossed"
+    assert outcome.exit_code == 1
+    report = _report(outcome)
+    assert (report["status"], report["failure_reason"]) == ("failed", "step_failed")
+    steps = report["steps"]
+    assert isinstance(steps, list)
+    assert [(s["exit_code"], s["started"], s["failure_reason"]) for s in steps] == [
+        (1, True, None),
+        (None, False, "budget_exhausted"),
+        (None, False, "budget_exhausted"),
+    ]
+    assert steps[0]["partial_answer"] is None
+    budget = report["budget"]
+    assert isinstance(budget, dict) and budget["spent_cost"] == 1.5
 ```
 
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/unit/headless_agents/test_review.py -q`
-Expected: 5 FAIL — `assert 2 == 1` (`a capped panel ran two members at once`), `0 == 7`
-and `0 == 1` (the members get no ledger), and the `ha show` header still `exit 0
-approved`. `test_an_uncapped_review_still_runs_its_members_concurrently` is the
+Expected: 6 FAIL — `assert 2 == 1` (`a capped panel ran two members at once`), `0 == 7`
+and `0 == 1` (the members get no ledger), the `ha show` header still `exit 0
+approved`, and `a member started after the cap was crossed`. `test_an_uncapped_review_still_runs_its_members_concurrently` is the
 non-regression guard of spec §4 "an uncapped review still runs concurrently": it passes
 before and after this task.
 
-- [ ] **Step 3: Implement.** The imports become `from .budget import BUDGET_EXHAUSTED,
-  BUDGET_REASONS, Caps, Ledger, cost_cap, input_tokens_cap` and `from .capability import
-  BUDGET_EXIT_CODE, scoped_environment`; add `skipped_step_entry,` after
-  `refused_step_entry,` in the `.report` import. Replace `_run_phase` entirely with:
+- [ ] **Step 3: Implement.** The `.budget` import becomes:
 
 ```python
+from .budget import (
+    BUDGET_EXHAUSTED,
+    BUDGET_REASONS,
+    BUDGET_UNMEASURED,
+    Caps,
+    Ledger,
+    cost_cap,
+    input_tokens_cap,
+)
+```
+
+  and `from .capability import BUDGET_EXIT_CODE, scoped_environment`; add
+  `skipped_step_entry,` after `refused_step_entry,` in the `.report` import. Replace
+  `_Phase` and `_run_phase` entirely with (`_Phase` gains `stopped`; `_budget_stop` gates
+  later launches on the LEDGER, so a member whose tripwire cleared its budget reason still
+  stops the panel, while its own exit and `step_failed` stay):
+
+```python
+@dataclass(frozen=True)
+class _Phase:
+    """A phase's steps once they ran: entries for the report, and the texts."""
+
+    entries: list[dict[str, object]]
+    results: list[RunResult | None]
+    failure_reason: str | None
+    #: Why the steps after a budget stop were not started (spec 2026-10-13 usage §3.6);
+    #: ``None`` when nothing stopped the phase on its budget.
+    stopped: str | None = None
+
+
+def _budget_stop(ledger: Ledger, result: RunResult) -> str | None:
+    """Why no later step may start after ``result`` (spec 2026-10-13 usage §3.6): its own
+    budget reason, else the ledger's state. A crossing or an unmeasured finish stops the
+    run even when a safety failure (a tripwire) took the step's own code and reason."""
+    if result.failure_reason in BUDGET_REASONS:
+        return result.failure_reason
+    if ledger.crossed:
+        return BUDGET_EXHAUSTED
+    if ledger.unmeasured:
+        return BUDGET_UNMEASURED
+    return None
+
+
 def _run_phase(
     plan: Plan,
     steps: Sequence[tuple[int, SlotPlan, str]],
@@ -3415,8 +3799,7 @@ def _run_phase(
                     continue
                 ran = run_one(step)
                 results.append(ran)
-                if ran.failure_reason in BUDGET_REASONS:
-                    stopped = ran.failure_reason
+                stopped = _budget_stop(ledger, ran)
         except BaseException:
             procgroup.kill_collected(live)
             raise
@@ -3465,19 +3848,23 @@ def _run_phase(
         entry["verdict"] = read_verdict(result.text)
         entries.append(entry)
         failed = failed or result.exit_code != 0 or not (result.text or "").strip()
-    reason = stopped if stopped is not None else ("step_failed" if failed else None)
-    return _Phase(entries=entries, results=results, failure_reason=reason)
+    # The deciding step's own budget reason; a safety failure keeps ``step_failed``.
+    own = [r.failure_reason for r in results if r is not None and r.failure_reason]
+    budget = [reason for reason in own if reason in BUDGET_REASONS]
+    reason = budget[-1] if budget else ("step_failed" if failed else None)
+    return _Phase(entries=entries, results=results, failure_reason=reason, stopped=stopped)
 ```
 
   In `_execute_review`, add the keyword `ledger: Ledger | None = None` after
   `admission_wait`, append to its docstring ` Under a budget the reviewers take turns, and a
   budget stop leaves the judge unstarted and the review without a verdict (spec 2026-10-13
   usage §3.6).`, and pass `ledger=ledger,` after `say=say,` to BOTH `_run_phase(...)`
-  calls. After the judge's `if failure is None and judge is not None:` block (it ends with
-  `deciding = judged.results[0]`), add the never-started judge:
+  calls. The judge's condition becomes `if failure is None and phase.stopped is None and
+  judge is not None:`, and after that block (it ends with `deciding =
+  judged.results[0]`) add the never-started judge:
 
 ```python
-        elif failure in BUDGET_REASONS and judge is not None:
+        elif phase.stopped is not None and judge is not None:
             index, slot = judge
             name = step_dir_name(index, slot.slot, slot.role.name)
             entries.append(
@@ -3486,7 +3873,7 @@ def _run_phase(
                     slot=slot.slot,
                     role=slot.role.name,
                     step_dir=f"steps/{name}",
-                    reason=failure,
+                    reason=phase.stopped,
                 )
             )
 ```
@@ -3536,6 +3923,7 @@ git commit -m "✨ feat(engine): run a capped review's members in turn and stop 
 - Modify: `src/headless_agents/engine.py` — `_execute_write` (1138-1237: signature and
   docstring, its `run_links` closure, `step_entry`, `report.update`), `execute`'s
   `_execute_write(...)` call (1685-1701)
+- Modify: `src/headless_agents/cli.py` — `_run`'s plain output of a write (910-912)
 - Test: `tests/unit/headless_agents/test_implement.py` (imports 23, append after 635)
 
 **Interfaces:**
@@ -3695,14 +4083,28 @@ def test_a_tripwire_during_a_capped_run_keeps_its_own_code(
     report = json.loads((outcome.run_dir / "run.json").read_text())
     assert (report["status"], report["failure_reason"]) == ("failed", "tripwire")
     assert lineage.load(world.state, outcome.run_id).compromised == "tripwire"
+
+
+def test_ha_run_of_a_write_stopped_on_the_cap_prints_nothing_on_stdout(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _capped_writer(world, monkeypatch)
+    code, out, err = world.cli("run", "oc-build", "--max-cost", "0.5", "Add a flag.")
+    assert (code, out) == (BUDGET_EXIT_CODE, "")
+    assert "branch: ha/" in err and "patch: " in err, "the residue is named on stderr"
+    assert err.endswith(
+        "ha: budget exhausted; partial answer follows (not an answer):\nI was adding it\n"
+    )
+    code, out, _ = world.cli("run", "oc-build", "--max-cost", "0.5", "--json", "Add a flag.")
+    assert code == BUDGET_EXIT_CODE and json.loads(out)["status"] == "budget_exhausted"
 ```
 
 - [ ] **Step 2: Run them to see them fail**
 
 Run: `uv run pytest tests/unit/headless_agents/test_implement.py -q`
-Expected: 5 FAIL — the writer gets `spec.budget is None` (`_execute_write` passes no
+Expected: 6 FAIL — the writer gets `spec.budget is None` (`_execute_write` passes no
 ledger): exit `0 == 7`, the tripwire test on `the step did reach its cap`, the unmeasured
-test on `0 == 1`.
+test on `0 == 1`, the plain CLI test on `(0, 'run: ...') == (7, '')`.
 
 - [ ] **Step 3: Implement.** In `write_flow.py`, after `from . import locks, provenance,
   quarantine` add `from .budget import BUDGET_EXHAUSTED, BUDGET_UNMEASURED` and `from
@@ -3764,6 +4166,18 @@ def _step_failure(final: RunResult) -> tuple[int, str, str]:
   In `execute`, pass `ledger=ledger,` after `admission_wait=admission_wait,` to the
   `_execute_write(...)` call.
 
+  In `cli.py`, a plain `ha run` of a write stopped on its cap prints nothing on stdout
+  (spec §3.6); its header goes to stderr, before the labelled partial. In `_run`:
+
+```python
+    elif outcome.final is not None:
+        if isinstance(branch, str):
+            # Spec 2026-10-13 usage §3.6: a budget stop prints nothing on stdout; a write's
+            # header (run, branch, diffstat, patch) still names its residue, on stderr.
+            stopped = outcome.exit_code == BUDGET_EXIT_CODE
+            (io.stderr if stopped else io.stdout).write(_write_header(outcome, branch))
+```
+
 - [ ] **Step 4: Run the tests** — `uv run pytest tests/unit -q` → all pass.
 
 - [ ] **Step 5: Lint and type-check** — `uv run ruff format src tests && uv run ruff check src tests && uv run mypy src` exit 0.
@@ -3773,6 +4187,7 @@ def _step_failure(final: RunResult) -> tuple[int, str, str]:
 ```sh
 git add src/headless_agents/write_flow.py
 git add src/headless_agents/engine.py
+git add src/headless_agents/cli.py
 git add tests/unit/headless_agents/test_implement.py
 git commit -m "✨ feat(write): give a write's budget stop its own code and status"
 ```
@@ -3856,7 +4271,8 @@ Expected: FAIL, `assert 0 == 2` (no exit 7 line in the epilog yet).
   judge. The spend overshoots by at most the steps that finished within one poll of the
   crossing, all recorded. What the step wrote so far is a partial answer, never the answer:
   on stderr after `ha: budget exhausted; partial answer follows (not an answer):`, in the
-  step's `partial_answer`, and under a labelled block in `ha show`. A finished step that
+  step's `partial_answer`, and under a labelled block in `ha show`; stdout stays empty, and a
+  write's header (run id, branch, diffstat, patch) goes to stderr too. A finished step that
   reports no cost (under `--max-cost`) or no input tokens (under `--max-input-tokens`) stops
   the run with exit `1` and `failure_reason: "budget_unmeasured"`. An implement step stopped
   on its cap commits its residue as any failed step does, and can be continued. Example:
