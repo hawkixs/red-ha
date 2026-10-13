@@ -39,7 +39,7 @@ from typing import IO, Final
 from . import lineage as lineages
 from . import locks, presets, prove, quarantine, show, updaters
 from .budget import cost_cap, input_tokens_cap
-from .capability import INVALID_USAGE_EXIT_CODE
+from .capability import BUDGET_EXIT_CODE, INVALID_USAGE_EXIT_CODE
 from .cli_models import MODEL_OPTIONAL, MODELS_FILE_NAME, default_models_path, load_models
 from .config_paths import config_dir, config_file, state_dir
 from .engine import (
@@ -958,7 +958,21 @@ def _run(args: argparse.Namespace, io: Io) -> int:
             f"{provider} exited {outcome.exit_code}{because}; run {outcome.run_id}, "
             f"logs in {outcome.run_dir}"
         )
+    partial = _partial_answer(report) if outcome.exit_code == BUDGET_EXIT_CODE else None
+    if partial is not None and not args.json:
+        io.say("budget exhausted; partial answer follows (not an answer):")
+        io.stderr.write(partial if partial.endswith("\n") else partial + "\n")
     return outcome.exit_code
+
+
+def _partial_answer(report: Mapping[str, object]) -> str | None:
+    """Return the partial answer of the step that exhausted the run budget, if any."""
+    steps = report.get("steps")
+    for step in reversed(steps if isinstance(steps, list) else []):
+        partial = step.get("partial_answer") if isinstance(step, dict) else None
+        if isinstance(partial, str) and partial.strip():
+            return partial
+    return None
 
 
 # ── ha roles ────────────────────────────────────────────────────────────────

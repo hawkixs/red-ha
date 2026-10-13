@@ -15,10 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from headless_agents import cli, engine, locks, proof_state
+from headless_agents import cli, engine, locks, proof_state, registry
+from headless_agents.budget import BUDGET_EXHAUSTED, BUDGET_UNMEASURED, Ledger
+from headless_agents.capability import BUDGET_EXIT_CODE
 from headless_agents.context import resolve_context, role_instructions
 from headless_agents.engine import Overrides, Request, UsageError, execute, plan
 from headless_agents.proofs import CLI_RAILS, proof_path, record_proof
+from headless_agents.providers import opencode
 from headless_agents.registry import Probe
 from headless_agents.result import RunResult, TokenUsage
 from headless_agents.run_record import record, run_id_of
@@ -1198,3 +1201,288 @@ def test_one_summary_line_closes_the_run(world: World) -> None:
         f"run {outcome.run_id}: exit 0, cost 0.5 USD, input 1.5k (cached 1.0k), output 20"
     ]
     assert world.said[-1] == summaries[0]
+
+
+# ── budget caps (spec 2026-10-13 usage and budget §3.6) ─────────────────────
+
+
+@dataclass
+class _Spender:
+    """A capped rail's stand-in: it charges the run's ledger as opencode's meter does, and
+    stops with exit 7 and its partial once the run's spend reaches a cap. ``unmeasured``
+    stands for a finish without the measure its cap needs; ``complete`` false for a call
+    killed in flight."""
+
+    name: str
+    cost: float = 0.5
+    input_tokens: int = 1000
+    partial: str = "half of an answer"
+    complete: bool = True
+    unmeasured: bool = False
+    specs: list[RunSpec] = field(default_factory=list)
+
+    def run(self, spec: RunSpec) -> RunResult:
+        self.specs.append(spec)
+        ledger = spec.budget
+        crossed = False
+        if ledger is not None:
+            ledger.measure(cost=self.cost, input_tokens=self.input_tokens)
+            if self.unmeasured or not self.complete:
+                ledger.complete = False
+            ledger.settle()
+            crossed = ledger.crossed
+        code, reason = 0, None
+        if crossed:
+            code, reason = BUDGET_EXIT_CODE, BUDGET_EXHAUSTED
+        elif self.unmeasured:
+            code, reason = 1, BUDGET_UNMEASURED
+        spec = spec.with_run_dir_defaults()
+        return record(
+            spec,
+            RunResult(
+                exit_code=code,
+                provider=self.name,
+                model=spec.model,
+                report_path=spec.report_log,
+                events_log=spec.events_log,
+                tokens=TokenUsage(input=self.input_tokens, output=10),
+                duration_seconds=0.1,
+                tool_call_completed=False,
+                text="the answer" if code == 0 else None,
+                run_id=run_id_of(spec),
+                cost_usd=self.cost,
+                partial_text=self.partial if crossed else None,
+                failure_reason=reason,
+                usage_complete=self.complete and not self.unmeasured,
+            ),
+        )
+
+
+def _run_json(outcome: engine.Outcome) -> dict[str, object]:
+    return json.loads((outcome.run_dir / "run.json").read_text())
+
+
+def test_a_capped_run_hands_its_one_ledger_to_its_step(world: World) -> None:
+    spender = world.fakes["opencode"] = _Spender("opencode", cost=0.25)  # type: ignore[assignment]
+    outcome = world.run("opencode", max_cost=1.0)
+    assert outcome.exit_code == 0, world.said
+    (spec,) = spender.specs
+    assert isinstance(spec.budget, Ledger) and spec.budget.caps.max_cost == 1.0
+    report = _run_json(outcome)
+    assert (report["status"], report["failure_reason"]) == ("answered", None)
+    assert report["budget"] == {
+        "max_cost": 1.0,
+        "max_input_tokens": None,
+        "spent_cost": 0.25,
+        "spent_input_tokens": 1000,
+        "spent_complete": True,
+        "overshoot_cost": 0.0,
+        "overshoot_input_tokens": None,
+    }
+    uncapped = world.run("opencode")
+    assert spender.specs[1].budget is None
+    assert _run_json(uncapped)["budget"] is None
+
+
+def test_a_step_reaching_the_cap_ends_the_run_budget_exhausted(world: World) -> None:
+    world.fakes["opencode"] = _Spender("opencode", cost=0.75)  # type: ignore[assignment]
+    outcome = world.run("opencode", max_cost=0.5)
+    assert outcome.exit_code == BUDGET_EXIT_CODE
+    report = _run_json(outcome)
+    assert (report["status"], report["exit_code"], report["text"]) == (
+        "budget_exhausted",
+        7,
+        None,
+    )
+    assert report["failure_reason"] == "budget_exhausted"
+    (step,) = report["steps"]  # type: ignore[misc]
+    assert (step["exit_code"], step["partial_answer"], step["failure_reason"]) == (
+        7,
+        "half of an answer",
+        "budget_exhausted",
+    )
+    assert (step["steps_after_crossing"], step["started"]) == (0, True)
+    assert report["budget"]["overshoot_cost"] == 0.25  # type: ignore[index]
+    assert world.registry().resolve(outcome.run_id).status == "budget_exhausted"
+
+
+def test_a_chain_whose_first_link_hits_the_cap_never_starts_the_second(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Admission would refuse codex (it reports usage only at the end): pretend it can.
+    monkeypatch.setattr(registry, "USAGE_DURING_RUN_RAILS", frozenset({"opencode", "codex"}))
+    world.roles('[pair]\nchain = ["opencode", "codex"]\n')
+    world.fakes["opencode"] = _Spender("opencode", input_tokens=1000)  # type: ignore[assignment]
+    outcome = world.run("pair", max_input_tokens=500)
+    assert outcome.exit_code == BUDGET_EXIT_CODE
+    assert "codex" not in world.fakes, "the next link was started"
+    assert not any("falling back" in line for line in world.said)
+
+
+def test_an_unmeasured_step_fails_the_run_with_a_lower_bound(world: World) -> None:
+    world.fakes["opencode"] = _Spender("opencode", cost=0.25, unmeasured=True)  # type: ignore[assignment]
+    outcome = world.run("opencode", max_cost=1.0)
+    assert outcome.exit_code == 1
+    report = _run_json(outcome)
+    assert (report["status"], report["failure_reason"]) == ("failed", "budget_unmeasured")
+    assert report["steps"][0]["failure_reason"] == "budget_unmeasured"  # type: ignore[index]
+    budget = report["budget"]
+    assert isinstance(budget, dict)
+    assert (budget["spent_cost"], budget["spent_complete"], budget["overshoot_cost"]) == (
+        0.25,
+        False,
+        None,
+    )
+    assert (report["cost_complete"], report["tokens_complete"]) == (False, False)
+    assert world.said[-1] == (
+        f"run {outcome.run_id}: exit 1, cost ≥ 0.25 USD (incomplete), "
+        "input ≥ 1.0k, output ≥ 10 (incomplete)"
+    )
+
+
+def test_a_crossing_with_a_call_killed_in_flight_records_null_overshoots(world: World) -> None:
+    world.fakes["opencode"] = _Spender("opencode", cost=0.75, complete=False)  # type: ignore[assignment]
+    outcome = world.run("opencode", max_cost=0.5)
+    assert outcome.exit_code == BUDGET_EXIT_CODE
+    report = _run_json(outcome)
+    budget = report["budget"]
+    assert isinstance(budget, dict)
+    assert (budget["spent_complete"], budget["overshoot_cost"]) == (False, None)
+    assert world.said[-1].startswith(f"run {outcome.run_id}: exit 7, cost ≥ 0.75 USD (incomplete)")
+
+
+def _cli_run(world: World, *argv: str) -> tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    code = cli.main(
+        list(argv),
+        environ={"PATH": "/usr/bin:/bin", "HOME": str(world.home)},
+        stdin=io.StringIO(""),
+        stdout=out,
+        stderr=err,
+        cwd=world.repo,
+        home=world.home,
+    )
+    return code, out.getvalue(), err.getvalue()
+
+
+def test_ha_run_prints_no_answer_and_the_labelled_partial_on_stderr(world: World) -> None:
+    world.fakes["opencode"] = _Spender("opencode", cost=0.75)  # type: ignore[assignment]
+    code, out, err = _cli_run(world, "run", "opencode", "--max-cost", "0.5", "task")
+    assert (code, out) == (BUDGET_EXIT_CODE, "")
+    assert "(budget_exhausted)" in err
+    assert err.endswith(
+        "ha: budget exhausted; partial answer follows (not an answer):\nhalf of an answer\n"
+    )
+
+
+def test_ha_run_json_carries_the_partial_in_its_step(world: World) -> None:
+    world.fakes["opencode"] = _Spender("opencode", cost=0.75)  # type: ignore[assignment]
+    code, out, err = _cli_run(world, "run", "opencode", "--max-cost", "0.5", "--json", "task")
+    assert code == BUDGET_EXIT_CODE
+    report = json.loads(out)
+    assert report["steps"][0]["partial_answer"] == "half of an answer"
+    assert report["text"] is None and "partial answer follows" not in err
+
+
+def _finish_event(part_id: str, cost: object, tokens: bool = True) -> dict[str, object]:
+    part: dict[str, object] = {"id": part_id, "type": "step-finish", "cost": cost}
+    if tokens:
+        part["tokens"] = {"input": 100, "output": 10, "reasoning": 0, "cache": {"read": 0}}
+    return {"type": "step_finish", "part": part}
+
+
+def _metered_opencode(
+    monkeypatch: pytest.MonkeyPatch, events: list[dict[str, object]], code: int
+) -> opencode.OpenCodeProvider:
+    """The real opencode rail over a stand-in process: it writes ``events`` and meters them
+    as ``run_opencode`` does once its child exited."""
+
+    def fake_run(**kwargs: object) -> int:
+        events_log = kwargs["events_log"]
+        assert isinstance(events_log, Path)
+        events_log.parent.mkdir(parents=True, exist_ok=True)
+        events_log.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+        meter = kwargs["meter"]
+        if isinstance(meter, opencode.StepMeter):
+            meter.read(events_log, final=True)
+            meter.close()
+        return code
+
+    monkeypatch.setattr(opencode, "run_opencode", fake_run)
+    return opencode.OpenCodeProvider()
+
+
+def test_a_nan_cost_never_reaches_the_record_and_the_valid_spend_is_a_lower_bound(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = [
+        {"type": "step_start", "part": {"id": "s1"}},
+        _finish_event("f1", 0.25),
+        {"type": "step_start", "part": {"id": "s2"}},
+        _finish_event("f2", float("nan")),
+    ]
+    world.fakes["opencode"] = _metered_opencode(monkeypatch, events, 1)  # type: ignore[assignment]
+    code, out, err = _cli_run(world, "run", "opencode", "--max-cost", "1", "--json", "task")
+    assert code == 1 and "NaN" not in out
+    report = json.loads(out)
+    assert (report["failure_reason"], report["steps"][0]["cost_usd"]) == ("budget_unmeasured", 0.25)
+    assert (report["cost_usd"], report["cost_complete"], report["tokens_complete"]) == (
+        0.25,
+        False,
+        False,
+    )
+    budget = report["budget"]
+    assert (budget["spent_cost"], budget["spent_complete"], budget["overshoot_cost"]) == (
+        0.25,
+        False,
+        None,
+    )
+    summary = f"ha: run {report['run_id']}: exit 1, "
+    rest = "cost ≥ 0.25 USD (incomplete), input ≥ 200 (cached ≥ 0), output ≥ 20 (incomplete)\n"
+    assert summary + rest in err
+
+
+def test_a_cost_reported_without_tokens_reaches_the_record(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = [
+        {"type": "step_start", "part": {"id": "s1"}},
+        _finish_event("f1", 0.5, tokens=False),
+    ]
+    world.fakes["opencode"] = _metered_opencode(monkeypatch, events, 0)  # type: ignore[assignment]
+    code, out, err = _cli_run(world, "run", "opencode", "--max-cost", "1", "--json", "task")
+    assert code == 0
+    report = json.loads(out)
+    assert (report["cost_usd"], report["cost_complete"]) == (0.5, True)
+    assert (report["tokens"], report["tokens_complete"]) == (None, False)
+    assert report["budget"]["spent_cost"] == 0.5 and report["budget"]["overshoot_cost"] == 0.0
+    assert f"ha: run {report['run_id']}: exit 0, cost 0.5 USD\n" in err
+
+
+def test_a_token_block_without_output_keeps_its_input_in_every_display(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    no_output = {
+        "type": "step_finish",
+        "part": {"id": "f1", "cost": 0.25, "tokens": {"input": 100, "cache": {"read": 50}}},
+    }
+    events = [{"type": "step_start", "part": {"id": "s1"}}, no_output]
+    world.fakes["opencode"] = _metered_opencode(monkeypatch, events, 0)  # type: ignore[assignment]
+    code, out, err = _cli_run(
+        world, "run", "opencode", "--max-input-tokens", "1000", "--json", "task"
+    )
+    assert code == 0
+    report = json.loads(out)
+    assert report["tokens"] == {
+        "input": 150,
+        "output": None,
+        "fresh": 100,
+        "cached": 50,
+        "thinking": None,
+    }
+    assert (report["tokens_complete"], report["cost_usd"]) == (True, 0.25)
+    assert report["budget"]["spent_input_tokens"] == 150
+    run_id = report["run_id"]
+    assert f"ha: run {run_id}: exit 0, cost 0.25 USD, input 150 (cached 50)\n" in err
+    code, shown, _ = _cli_run(world, "show", run_id)
+    assert code == 0 and "total   in 150 out -  $0.25" in shown.splitlines()

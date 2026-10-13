@@ -31,7 +31,7 @@ from typing import Final
 
 from . import lineage as lineages
 from . import locks, procgroup, proof_state, retire, review_flow, reviews, structured, write_flow
-from .budget import Caps, cost_cap, input_tokens_cap
+from .budget import BUDGET_EXHAUSTED, Caps, Ledger, cost_cap, input_tokens_cap
 from .capability import scoped_environment
 from .chain import run_chain
 from .cli_models import ModelsError, check_known_model, model_sources_for, models_for
@@ -880,6 +880,7 @@ def _spec_for(
     run_id: str,
     run_dir: Path,
     workspace: Workspace | None,
+    budget: Ledger | None = None,
 ) -> RunSpec:
     http = provider in HTTP_PROVIDER_NAMES
     role = plan.role
@@ -906,6 +907,7 @@ def _spec_for(
         context=bundle,
         extra=extra,
         output_schema=plan.request.output_schema,
+        budget=budget,
     )
 
 
@@ -920,8 +922,9 @@ def _run_links(
     index: int = 1,
     slot: str = "run",
     attempts: list[RunResult] | None = None,
+    ledger: Ledger | None = None,
 ) -> RunResult:
-    """The 0.4.0 chain, unchanged: walk the role's links on 3 and 4 (§3.4)."""
+    """The 0.4.0 chain walks links on 3 and 4 (§3.4). A budget stop is no fallback code."""
     providers = plan.role.providers
     chained = len(providers) > 1
     results: dict[str, RunResult] = {}
@@ -933,7 +936,13 @@ def _run_links(
 
     def run_one(provider: str) -> int:
         spec = _spec_for(
-            provider, plan, bundle, run_id=run_id, run_dir=link_dir(provider), workspace=workspace
+            provider,
+            plan,
+            bundle,
+            run_id=run_id,
+            run_dir=link_dir(provider),
+            workspace=workspace,
+            budget=ledger,
         )
         say(_configuration_line(index, slot, plan, provider, spec))
         result = get_provider(provider).run(spec)
@@ -956,6 +965,23 @@ def _run_links(
     if outcome.dead_links:
         say(f"no answer within the deadline from: {', '.join(outcome.dead_links)}")
     return final
+
+
+def _crossing(ledger: Ledger | None, result: RunResult) -> int | None:
+    """Return the count of steps after the crossing, when this result exhausted the budget."""
+    if ledger is None or result.failure_reason != BUDGET_EXHAUSTED:
+        return None
+    return ledger.steps_after_crossing
+
+
+def _budget(ledger: Ledger | None) -> dict[str, object] | None:
+    """Return the ledger record, or None for an uncapped run."""
+    return ledger.record() if ledger is not None else None
+
+
+def _failed_status(failure_reason: str | None) -> str:
+    """Return the final status for a run that did not answer."""
+    return "budget_exhausted" if failure_reason == BUDGET_EXHAUSTED else "failed"
 
 
 def _configuration_line(index: int, slot: str, plan: Plan, provider: str, spec: RunSpec) -> str:
@@ -1707,6 +1733,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
 
         started = time.monotonic()
         run_dir = entry.run_dir
+        ledger = Ledger(plan.caps) if plan.caps.capped else None
         # §3.10: prompt.md is the task as given; the provider gets its template around it.
         task = plan.task if plan.task is not None else plan.prompt
         (run_dir / PROMPT_FILE).write_text(task, encoding="utf-8")
@@ -1767,6 +1794,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
             workspace=Workspace(path=repository),
             say=say,
             attempts=earlier,
+            ledger=ledger,
         )
         say(f"step 1 run {role.name}: exit {final.exit_code}")
         report = with_step(
@@ -1782,15 +1810,19 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
                 effort=role.effort,
                 timeout_seconds=role.timeout,
                 attempts=earlier,
+                steps_after_crossing=_crossing(ledger, final),
             ),
         )
         exit_code, failure_reason = _schema_outcome(request, final, say)
-        status = "answered" if exit_code == 0 else "failed"
+        if failure_reason is None:
+            failure_reason = final.failure_reason
+        status = "answered" if exit_code == 0 else _failed_status(failure_reason)
         report.update(
             status=status,
             exit_code=exit_code,
             text=final.text,
             failure_reason=failure_reason,
+            budget=_budget(ledger),
             duration_seconds=round(time.monotonic() - started, 3),
         )
         write_report(run_dir, report)
