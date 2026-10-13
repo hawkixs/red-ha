@@ -6,9 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from headless_agents.engine import operator_environment
 from headless_agents.model_vendor import (
     UNKNOWN,
     VendorTableError,
+    backend_switches,
+    codex_argv_switches,
     load_table,
     shipped_table,
 )
@@ -131,3 +134,47 @@ def test_the_digest_changes_with_the_operator_pairs(tmp_path: Path) -> None:
     assert plain.digest.startswith("sha256:")
     assert plain.digest == shipped_table().digest
     assert plain.digest != extended.digest
+
+
+def test_backend_switches_are_named_by_presence() -> None:
+    assert backend_switches("codex", {"OPENAI_BASE_URL": "x"}) == ("OPENAI_BASE_URL",)
+    assert backend_switches("codex", {"OPENAI_BASE_URL": ""}) == ("OPENAI_BASE_URL",)
+    assert backend_switches("codex", {"OPENAI_API_BASE": "x", "PATH": "/bin"}) == (
+        "OPENAI_API_BASE",
+    )
+    assert backend_switches("claude", {"ANTHROPIC_BASE_URL": "x"}) == ("ANTHROPIC_BASE_URL",)
+    assert backend_switches("claude", {"OPENAI_BASE_URL": "x"}) == ()
+    assert backend_switches("vibe", {"OPENAI_BASE_URL": "x", "ANTHROPIC_BASE_URL": "y"}) == ()
+    assert backend_switches("codex", {}) == ()
+
+
+@pytest.mark.parametrize(
+    ("argv", "named"),
+    [
+        (["codex", "exec", "-c", 'model_provider="oss"'], ("model_provider",)),
+        (["codex", "exec", "-c", 'model_providers.x.base_url="u"'], ("model_providers.*",)),
+        (["codex", "exec", "--profile", "p"], ("--profile",)),
+        (["codex", "exec", "-p", "p"], ("--profile",)),
+        (["codex", "exec", "--oss"], ("--oss",)),
+        (["codex", "exec", "--local-provider", "ollama"], ("--local-provider",)),
+        (["codex", "exec", "-c", "features.web_search=false"], ()),
+    ],
+)
+def test_codex_argv_switches(argv: list[str], named: tuple[str, ...]) -> None:
+    assert codex_argv_switches(argv) == named
+
+
+def test_a_clean_operator_environment_has_no_switch() -> None:
+    environment = operator_environment(
+        {
+            "PATH": "/bin",
+            "HOME": "/h",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "CLAUDE_CODE_USE_VERTEX": "1",
+        }
+    )
+    # The provider selectors never reach a child: operator_environment drops CLAUDE_CODE_*.
+    assert "CLAUDE_CODE_USE_BEDROCK" not in environment
+    assert "CLAUDE_CODE_USE_VERTEX" not in environment
+    assert backend_switches("claude", environment) == ()
+    assert backend_switches("codex", environment) == ()

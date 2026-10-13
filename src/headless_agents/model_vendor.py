@@ -20,6 +20,36 @@ UNKNOWN: Final = "unknown"
 VENDORS_FILE_NAME: Final = "vendors.toml"
 _GRAMMARS: Final = frozenset({"org", "bare", "opencode"})
 _OPENCODE_GRAMMARS: Final = frozenset({"org", "bare"})
+ENV_SWITCHES: Final[Mapping[str, frozenset[str]]] = {
+    "codex": frozenset({"OPENAI_BASE_URL", "OPENAI_API_BASE"}),
+    "claude": frozenset({"ANTHROPIC_BASE_URL"}),
+}
+_CODEX_FLAGS: Final = {
+    "--profile": "--profile",
+    "-p": "--profile",
+    "--oss": "--oss",
+    "--local-provider": "--local-provider",
+}
+
+
+def backend_switches(provider: str, environment: Mapping[str, str]) -> tuple[str, ...]:
+    """The backend-switching variables of ``provider`` present in its child environment."""
+    return tuple(sorted(ENV_SWITCHES.get(provider, frozenset()) & environment.keys()))
+
+
+def codex_argv_switches(argv: Sequence[str]) -> tuple[str, ...]:
+    """The backend switches a codex argv carries (spec D2bis)."""
+    found: set[str] = set()
+    for index, arg in enumerate(argv):
+        if arg in _CODEX_FLAGS:
+            found.add(_CODEX_FLAGS[arg])
+        if arg == "-c" and index + 1 < len(argv):
+            key = argv[index + 1].split("=", 1)[0].strip()
+            if key == "model_provider":
+                found.add("model_provider")
+            elif key.startswith("model_providers."):
+                found.add("model_providers.*")
+    return tuple(sorted(found))
 
 
 class VendorTableError(ValueError):
@@ -163,10 +193,13 @@ def load_table(operator_file: Path | None) -> VendorTable:
 
 
 __all__ = [
+    "ENV_SWITCHES",
     "UNKNOWN",
     "VENDORS_FILE_NAME",
     "VendorTable",
     "VendorTableError",
+    "backend_switches",
+    "codex_argv_switches",
     "load_table",
     "shipped_table",
 ]

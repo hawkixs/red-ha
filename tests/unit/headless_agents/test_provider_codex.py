@@ -21,6 +21,8 @@ from headless_agents.capability import (
     TIMEOUT_EXIT_CODE,
     TIMEOUT_REPLAYABLE_EXIT_CODE,
 )
+from headless_agents.engine import operator_environment
+from headless_agents.model_vendor import backend_switches, codex_argv_switches
 from headless_agents.profile import CapabilityProfile, McpServer, Workspace
 from headless_agents.providers import codex
 from headless_agents.spec import RunSpec
@@ -60,6 +62,70 @@ def _operator_codex_login(
 
 def _overrides(command: list[str]) -> list[str]:
     return [command[i + 1] for i, item in enumerate(command) if item == "-c"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["codex", "exec", "-c", 'model_provider="oss"', "-"],
+        ["codex", "exec", "--oss", "-"],
+        ["codex", "exec", "-p", "work", "-"],
+    ],
+)
+def test_an_argv_with_a_backend_switch_is_refused(argv: list[str]) -> None:
+    with pytest.raises(ValueError, match="backend switch"):
+        codex.refuse_argv_switches(argv)
+
+
+def test_a_clean_argv_passes() -> None:
+    codex.refuse_argv_switches(["codex", "exec", "-c", "features.web_search=false", "-"])
+
+
+def test_build_codex_command_output_has_no_switch_in_every_workspace_mode(tmp_path: Path) -> None:
+    modes: list[Workspace | None] = [
+        None,
+        Workspace(path=tmp_path),
+        Workspace(path=tmp_path, write=True),
+        Workspace(path=tmp_path, write=True, shell=True),
+    ]
+    for mode in modes:
+        for server in (None, _server()):
+            command = codex.build_codex_command(
+                model="m",
+                reasoning_effort="low",
+                report_log=tmp_path / "r",
+                workspace=tmp_path,
+                mcp=server,
+                workspace_mode=mode,
+            )
+            assert codex_argv_switches(command) == ()
+
+
+def test_build_codex_command_calls_argv_switch_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received: list[list[str]] = []
+    monkeypatch.setattr(codex, "refuse_argv_switches", lambda argv: received.append(argv))
+    command = codex.build_codex_command(
+        model="m", reasoning_effort="low", report_log=tmp_path / "r", workspace=tmp_path, mcp=None
+    )
+    assert received == [command]
+
+
+def test_the_production_child_environment_carries_only_real_switches(tmp_path: Path) -> None:
+    clean = operator_environment({"PATH": "/bin", "HOME": "/h"})
+    spec = RunSpec(prompt="P", model="m", environment=clean, report_log=tmp_path / "report.log")
+    env = codex.CodexProvider().child_environment(spec, {})
+    assert env is not None and backend_switches("codex", env) == ()
+    codex.CodexProvider().build_command(spec)
+    switched = RunSpec(
+        prompt="P",
+        model="m",
+        environment=operator_environment({"PATH": "/bin", "OPENAI_BASE_URL": "http://x"}),
+        report_log=tmp_path / "report.log",
+    )
+    env = codex.CodexProvider().child_environment(switched, {})
+    assert env is not None and backend_switches("codex", env) == ("OPENAI_BASE_URL",)
 
 
 class TestBuildCodexCommand:
