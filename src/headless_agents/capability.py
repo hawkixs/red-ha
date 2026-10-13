@@ -27,6 +27,8 @@ from urllib.parse import SplitResult, urlsplit
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 LOOPBACK_NO_PROXY_ENTRIES = ("127.0.0.1", "localhost", "::1")
 TERMINATION_GRACE_SECONDS = 5.0
+#: How long :func:`kill_process_group` waits for the killed group to be gone.
+KILL_REAP_SECONDS = 1.0
 
 # The exit code that lets a chain replay the run on the NEXT provider. It does
 # not say "I failed" -- 1 already says that -- but "I failed AND I can PROVE
@@ -67,6 +69,13 @@ FALLBACK_EXIT_CODES = frozenset({PROVIDER_FALLBACK_EXIT_CODE, TIMEOUT_REPLAYABLE
 # a prompt that, with its context, no longer fits the argv of the rail that
 # must take it there. Never a switchover: the next link gets the same input.
 INVALID_USAGE_EXIT_CODE = 2
+
+# The run stopped because its measured spend reached or crossed its budget cap
+# (spec 2026-10-13 usage and budget, D7 and amendment A1): a dedicated code, the
+# first free one (5 is a write's "no change", 6 a review's "changes requested").
+# Never a fallback code: a chain stops on it by construction, and no later step
+# starts.
+BUDGET_EXIT_CODE = 7
 
 
 def failure_code_after_a_write(child_code: int) -> int:
@@ -296,6 +305,34 @@ def terminate_process_group(process: subprocess.Popen[str]) -> None:
         os.killpg(process_group, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def kill_process_group(process: subprocess.Popen[str]) -> None:
+    """SIGKILL the agent and every child it spawned, at once: no grace period.
+
+    A budget stop has no answer to wait for (spec 2026-10-13 usage and budget
+    §3.6), unlike a deadline, which :func:`terminate_process_group` lets end in
+    its grace. Requires ``start_new_session=True``, like that function.
+    """
+    process_group = process.pid
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        process.poll()
+        return
+    deadline = time.monotonic() + KILL_REAP_SECONDS
+    while time.monotonic() < deadline:
+        process.poll()  # Reap the leader; a killed child may linger a moment.
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
     try:
         process.wait(timeout=1)
     except subprocess.TimeoutExpired:

@@ -159,3 +159,48 @@ def test_terminate_process_group_tolerates_an_already_gone_process() -> None:
     process.wait()
     capability.terminate_process_group(process)
     assert process.returncode == 0
+
+
+# ── budget stops (spec 2026-10-13 usage and budget §3.6, D7, A1) ────────────
+
+
+def test_the_budget_code_is_7_and_never_a_fallback() -> None:
+    assert capability.BUDGET_EXIT_CODE == 7
+    assert capability.BUDGET_EXIT_CODE not in capability.FALLBACK_EXIT_CODES
+
+
+def _group_ignoring_sigterm() -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, subprocess, sys, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "subprocess.Popen([sys.executable, '-c', "
+            "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "time.sleep(60)']); "
+            "time.sleep(60)",
+        ],
+        text=True,
+        start_new_session=True,
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX")
+def test_kill_process_group_kills_at_once_without_a_grace() -> None:
+    process = _group_ignoring_sigterm()
+    time.sleep(0.3)  # let the child spawn its own child
+    started = time.monotonic()
+    capability.kill_process_group(process)
+    elapsed = time.monotonic() - started
+    assert elapsed < capability.TERMINATION_GRACE_SECONDS / 2, f"took {elapsed:.2f}s"
+    assert process.returncode is not None
+    with pytest.raises(ProcessLookupError):
+        os.killpg(process.pid, 0)
+
+
+def test_kill_process_group_tolerates_an_already_gone_process() -> None:
+    process = subprocess.Popen([sys.executable, "-c", "pass"], text=True, start_new_session=True)
+    process.wait()
+    capability.kill_process_group(process)
+    assert process.returncode == 0
