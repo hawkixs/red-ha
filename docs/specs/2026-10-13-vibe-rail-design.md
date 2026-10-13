@@ -258,10 +258,14 @@ invocations are not visible.
 |---|---|
 | refused before start (passthrough `VIBE_*`, missing key, unsupported MCP, home under workspace, invalid model id) | 2 |
 | launch failure (`OSError`), or invalid run and nothing could have written | 3 |
-| deadline, and no `effect` started | 4 |
-| deadline after an effect started | 124 |
+| any deadline: a caller deadline already expired before launch (nothing launched), or the runner's own deadline during the run | 124 (never 4, see below) |
 | invalid run after a possible write | `failure_code_after_a_write` → 1 |
 | valid run | 0 |
+
+Vibe never returns 4 (operator ruling, 2026-10-13, after round 3 of the plan review). Its
+stream is emitted on completion, so it can never prove that no tool call was issued, which is
+what `TIMEOUT_REPLAYABLE_EXIT_CODE` requires. claude is in the same position. A timed-out
+vibe link therefore stops a chain.
 
 A timeout sends SIGTERM to the process group, then SIGKILL after the grace period
 (`terminate_process_group`). ha never sends SIGINT, which Vibe turns into exit 0.
