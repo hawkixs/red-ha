@@ -1,6 +1,6 @@
 # Vendor rule by model vendor — design
 
-Date: 2026-10-13. Status: proposed (round 4). Follows the vibe rail (PR #9). Amends the
+Date: 2026-10-13. Status: approved (design review by codex, rounds 1-3 and closure verification). Follows the vibe rail (PR #9). Amends the
 vendor rule of spec 0.5.0 §3.8.4 (`src/headless_agents/vendor.py`).
 
 ## 1. Problem
