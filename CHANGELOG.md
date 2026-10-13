@@ -62,6 +62,11 @@ member rode a brain-v42 tag.
   list by renaming it; nothing is deleted, and archiving gives up protection against those
   legacy unconfined writes. `vendor_check` documents gain the `model-vendor` shape;
   legacy documents still read.
+- `build_codex_command` refuses (exit 2) an argv that could point codex at another backend:
+  `model_provider` or `model_providers.*` set through `-c`/`--config`, `--profile`/`-p`,
+  `--oss` or `--local-provider`, whether the value is a separate token or attached
+  (`--profile=work`, `-p=work`, `-pwork`). ha builds that argv itself, so this guards ha's
+  own code rather than operator input.
 - Every CLI worker ha starts (codex, claude, opencode, agy) now exports `AI_AGENT=<provider>`,
   always replacing a value inherited from the parent session. The ReD rail resolves the
   actor of each gesture from the environment and records `agent:<provider>` for a worker
@@ -69,6 +74,13 @@ member rode a brain-v42 tag.
   unchanged: they have no tools, so they run no gesture. The variable is part of the
   child environment the rail can rely on; a profile's `environment_passthrough` cannot
   override it (Brain ticket 5868f776).
+
+### Tests
+
+- The live suite runs as its own package (`tests/live/__init__.py`): `tests/live/headless_agents`
+  no longer shadows the `headless_agents` package, and the G1 write task accepts codex 0.160,
+  which edits files only through a command.
+- `test_no_log_is_no_evidence` also covers the `vibe` rail.
 
 ## 0.5.4 — 2026-10-03 (tag `v0.5.4` after merge)
 
