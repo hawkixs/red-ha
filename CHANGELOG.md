@@ -27,6 +27,11 @@ member rode a brain-v42 tag.
 
 ## Unreleased
 
+### Added
+
+- `vibe` CLI rail for Mistral Vibe 2.26.0 (read-only, write and write-with-shell profiles;
+  isolation and confinement proofs; no usage data).
+
 ### Fixed
 
 - `ha prove agy --confinement` could never conclude on agy 1.2.16: the guard's refusal of an
