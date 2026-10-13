@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 from pathlib import Path
 
 import pytest
@@ -216,6 +217,90 @@ def test_agent_text_claiming_a_refusal_is_not_evidence(tmp_path: Path) -> None:
     }
     (run / "events.jsonl").write_text(json.dumps(message))
     assert refused_attempts("codex", run, [config], line=LINE) == set()
+
+
+VIBE_FIXTURES = Path(__file__).parent / "fixtures" / "vibe"
+
+
+def _vibe_run_dir(tmp_path: Path, *entries: dict[str, object]) -> Path:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
+    return run_dir
+
+
+def _vibe_effect(tool: str, path: str, status: str, code: str | None) -> dict[str, object]:
+    state: dict[str, object] = {"status": status}
+    if code is not None:
+        state["error"] = {"code": code, "message": "Tool execution denied by approval callback"}
+    return {
+        "id": path,
+        "type": "effect",
+        "detail": {"toolName": tool, "input": {"filePath": path}},
+        "state": state,
+    }
+
+
+def test_vibe_a_denied_write_on_the_target_is_a_refusal(tmp_path: Path) -> None:
+    target = tmp_path / "outside" / "x.txt"
+    run_dir = _vibe_run_dir(
+        tmp_path, _vibe_effect("file_system.write_file", str(target), "failed", "tool_denied")
+    )
+    assert refused_attempts("vibe", run_dir, [target]) == {target}
+
+
+def test_vibe_the_recorded_outside_write_is_a_refusal(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    shutil.copy(VIBE_FIXTURES / "write-inside-outside.events.jsonl", run_dir / "events.jsonl")
+    target = Path("/fixture/outside/x.txt")
+    assert refused_attempts("vibe", run_dir, [target]) == {target}
+
+
+@pytest.mark.parametrize(
+    ("tool", "status", "code"),
+    [
+        ("file_system.read_file", "failed", "tool_denied"),  # a refused read is not a refused write
+        ("file_system.write_file", "failed", "tool_failed"),  # a failure that is not the gate's
+        ("file_system.write_file", "completed", None),  # it was written
+    ],
+)
+def test_vibe_anything_else_proves_nothing(
+    tmp_path: Path, tool: str, status: str, code: str | None
+) -> None:
+    target = tmp_path / "x.txt"
+    run_dir = _vibe_run_dir(tmp_path, _vibe_effect(tool, str(target), status, code))
+    assert refused_attempts("vibe", run_dir, [target]) == set()
+
+
+def test_vibe_an_equivalent_spelling_of_the_target_counts(tmp_path: Path) -> None:
+    target = tmp_path / "outside" / "x.txt"
+    target.parent.mkdir()
+    target.write_text("t")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    spelled = "../outside/./x.txt"
+    run_dir = _vibe_run_dir(
+        tmp_path, _vibe_effect("file_system.write_file", spelled, "failed", "tool_denied")
+    )
+    assert refused_attempts("vibe", run_dir, [target], workspace=workspace) == {target}
+
+
+def test_vibe_a_refusal_on_another_path_proves_nothing(tmp_path: Path) -> None:
+    run_dir = _vibe_run_dir(
+        tmp_path,
+        _vibe_effect("file_system.write_file", str(tmp_path / "other"), "failed", "tool_denied"),
+    )
+    assert refused_attempts("vibe", run_dir, [tmp_path / "x.txt"]) == set()
+
+
+def test_vibe_relative_refusal_without_workspace_is_not_evidence(tmp_path: Path) -> None:
+    relative = "ha-relative-refusal-evidence.txt"
+    target = Path.cwd() / relative
+    run_dir = _vibe_run_dir(
+        tmp_path, _vibe_effect("file_system.write_file", relative, "failed", "tool_denied")
+    )
+    assert refused_attempts("vibe", run_dir, [target]) == set()
 
 
 def test_a_target_with_a_space_and_a_quote_still_matches(tmp_path: Path) -> None:

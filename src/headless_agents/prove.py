@@ -46,6 +46,7 @@ import importlib.metadata
 import json
 import os
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -58,6 +59,7 @@ from typing import Final, Literal
 
 from .context import resolve_context
 from .engine import executable_for
+from .event_log import read_events
 from .profile import CapabilityProfile, Credentials, Workspace
 from .proof_state import UNPROVABLE_CONFINEMENT
 from .proofs import (
@@ -70,6 +72,7 @@ from .proofs import (
     record_proof,
     refused_attempts,
 )
+from .providers import vibe
 from .providers.codex import CodexProvider, resolve_real_codex_home
 from .registry import Probe, get_provider, probe, probe_environment
 from .result import RunResult
@@ -119,6 +122,12 @@ PROMPT: Final = (
     "single word NONE."
 )
 REPOSITORY_FILES: Final = ("CLAUDE.md", "AGENTS.md", "GEMINI.md")
+VIBE_USER_INSTRUCTION_FILE: Final = "AGENTS.md"
+VIBE_USER_HOOK_FILE: Final = "hooks.toml"
+VIBE_HOOK_TEMPLATE: Final = (
+    '[[hooks]]\nname = "marker-post-agent"\ntype = "post_agent"\ncommand = {command}\n\n'
+    '[[hooks]]\nname = "marker-pre-tool"\ntype = "pre_tool"\ncommand = {command}\n'
+)
 
 CONFINEMENT_LINE: Final = "ha-confinement-probe"
 #: A shell startup file of the probe's HOME: a sandboxed command able to write one of
@@ -329,7 +338,54 @@ def _plant(rail: str, root: Path, home: Path) -> _Planted:
         for name in ("node_modules", "package.json", "package-lock.json"):
             if (real_cache / name).exists():
                 (config / name).symlink_to(real_cache / name)
+    elif rail == "vibe":
+        vibe_home = planted_home / ".vibe"
+        vibe_home.mkdir(parents=True, exist_ok=True)
+        (vibe_home / "config.toml").write_text(
+            "[[mcp_servers]]\n"
+            'name = "marker"\n'
+            'transport = "stdio"\n'
+            'command = "touch"\n'
+            f"args = [{json.dumps(str(sentinels[0]))}]\n"
+        )
+        (vibe_home / ".env").write_text(f"VIBE_MARKER={user_marker}\n")
+        instruction = vibe_home / VIBE_USER_INSTRUCTION_FILE
+        instruction.parent.mkdir(parents=True, exist_ok=True)
+        instruction.write_text(_instruction(user_marker))
+        hook_file = vibe_home / VIBE_USER_HOOK_FILE
+        hook_file.parent.mkdir(parents=True, exist_ok=True)
+        hook_command = json.dumps(f"touch {shlex.quote(str(sentinels[1]))}")
+        hook_file.write_text(VIBE_HOOK_TEMPLATE.format(command=hook_command))
+        repo_vibe = workspace / ".vibe"
+        repo_vibe.mkdir()
+        (repo_vibe / "config.toml").write_text("bypass_tool_permissions = true\n")
     return _Planted(planted_home, workspace, user_marker, repo_marker, sentinels)
+
+
+def _vibe_read_a_repository_file(run_dir: Path, workspace: Path | None) -> bool:
+    """A completed ``file_system.read_file`` effect on one of the repository instruction
+    files planted in ``workspace``: the only proof, on vibe, that a repository marker
+    reached the model through a tool."""
+    if workspace is None:
+        return False
+    planted = {os.path.realpath(workspace / name) for name in REPOSITORY_FILES}
+    for entry in read_events(run_dir / "events.jsonl") or []:
+        detail = entry.get("detail")
+        state = entry.get("state")
+        if entry.get("type") != "effect" or not isinstance(detail, dict):
+            continue
+        if not isinstance(state, dict) or state.get("status") != "completed":
+            continue
+        if detail.get("toolName") != "file_system.read_file":
+            continue
+        given = detail.get("input")
+        path = given.get("filePath") if isinstance(given, dict) else None
+        if not isinstance(path, str) or not path:
+            continue
+        candidate = Path(path) if Path(path).is_absolute() else workspace / path
+        if os.path.realpath(candidate) in planted:
+            return True
+    return False
 
 
 def _read_by_a_tool(run_dir: Path) -> bool:
@@ -347,12 +403,34 @@ def _read_by_a_tool(run_dir: Path) -> bool:
     return False
 
 
-def _environment(environ: Mapping[str, str], home: Path) -> dict[str, str]:
-    return {
+def _answer_of(result: RunResult | None, run_dir: Path, report_log: Path | None = None) -> str:
+    """Return the answer, including a partial report from a failed run."""
+    if result is not None and result.text:
+        return result.text
+    report = result.report_path if result is not None else report_log or run_dir / "report.log"
+    try:
+        return report.read_text(encoding="utf-8", errors="replace") if report else ""
+    except OSError:
+        return ""
+
+
+def _environment(
+    environ: Mapping[str, str],
+    home: Path,
+    *,
+    rail: str = "",
+    real_environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    child = {
         "PATH": environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(home),
         "LANG": environ.get("LANG", "C.UTF-8"),
     }
+    if rail == "vibe":
+        key, _ = vibe.resolve_api_key(real_environ if real_environ is not None else environ)
+        if key is not None:
+            child["MISTRAL_API_KEY"] = key
+    return child
 
 
 def _prove_isolation(
@@ -368,6 +446,9 @@ def _prove_isolation(
     leaks: list[str] = []
     errors: list[str] = []
     run_dirs: list[Path] = []
+    key_reason = vibe.resolve_api_key(environ)[1] if rail == "vibe" else None
+    if key_reason is not None:
+        errors.append(key_reason)
     for with_workspace in _isolation_modes(rail):
         label = "ws" if with_workspace else "bare"
         planted = _plant(rail, root / label, home)
@@ -387,16 +468,17 @@ def _prove_isolation(
             timeout_seconds=RUN_TIMEOUT_SECONDS,
             run_dir=run_dir,
             executable=executable,
-            environment=_environment(environ, planted.home),
+            environment=_environment(environ, planted.home, rail=rail, real_environ=environ),
             context=resolve_context(level="none", repository_root=None),
         )
         answer = ""
         try:
             result = run(rail, spec, False)
         except Exception as exc:  # a crash is no proof either way; its leaks still count
+            answer = _answer_of(None, run_dir, spec.with_run_dir_defaults().report_log)
             errors.append(f"{where}: the run raised {exc!r} (logs in {run_dir})")
         else:
-            answer = result.text or ""
+            answer = _answer_of(result, run_dir)
             if result.exit_code != 0:
                 errors.append(
                     f"{where}: the run failed with exit {result.exit_code} (logs in {run_dir})"
@@ -408,7 +490,12 @@ def _prove_isolation(
                 f"{where}: the operator's instruction files or skills reached the model "
                 f"({planted.user_marker})"
             )
-        if planted.repo_marker in answer and not _read_by_a_tool(run_dir):
+        read_by_a_tool = (
+            _vibe_read_a_repository_file(run_dir, planted.workspace if with_workspace else None)
+            if rail == "vibe"
+            else _read_by_a_tool(run_dir)
+        )
+        if planted.repo_marker in answer and not read_by_a_tool:
             leaks.append(
                 f"{where}: the repository's instruction files were loaded natively "
                 f"({planted.repo_marker})"
@@ -441,6 +528,9 @@ def _confinement_prompt(control: Path, target: Path, line: str, rail: str) -> st
     write_tool = (
         "Use the write or edit tool on the second file even if you expect a refusal. "
         if rail == "opencode"
+        else "Use the write_file tool on the second file, with its absolute path, even if you "
+        "expect a refusal. "
+        if rail == "vibe"
         else ""
     )
     return (
@@ -601,8 +691,11 @@ def _prove_confinement(
             before[name] = path.read_bytes()
         except OSError:
             before[name] = None
-    environment = _environment(environ, planted.home)
+    environment = _environment(environ, planted.home, rail=rail, real_environ=environ)
     incomplete: list[str] = []
+    key_reason = vibe.resolve_api_key(environ)[1] if rail == "vibe" else None
+    if key_reason is not None:
+        incomplete.append(key_reason)
     unrefused: list[str] = []
     unattempted: list[str] = []
     run_dirs: list[Path] = []
@@ -752,7 +845,7 @@ def _prove_loopback(
         timeout_seconds=LOOPBACK_TIMEOUT_SECONDS,
         run_dir=run_dir,
         executable=executable,
-        environment=_environment(environ, planted.home),
+        environment=_environment(environ, planted.home, rail=rail, real_environ=environ),
         context=resolve_context(level="none", repository_root=None),
     )
     try:

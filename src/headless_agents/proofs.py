@@ -54,6 +54,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from .providers.vibe import WRITE_EFFECTS as _VIBE_WRITE_EFFECTS
+from .providers.vibe import denied as _vibe_denied
 from .state import Unknown, publish, read_optional
 
 CLI_RAILS: Final = ("claude", "codex", "agy", "opencode", "vibe")
@@ -855,6 +857,7 @@ def refused_attempts(
       refusal message, read from ``tool_info.output``, the step's ``error`` or
       ``tool_info.error.message`` (agy 1.2.11 was measured to end a refused
       ``write_to_file`` in ``ERROR`` with NO message: it stays inconclusive).
+    - vibe: an ``effect`` entry on a write tool (:data:`~headless_agents.providers.vibe.WRITE_EFFECTS`) that failed with ``error.code == "tool_denied"``, whose ``detail.input.filePath`` resolves (``os.path.realpath``, relative paths against the workspace) to the target (measured on Vibe 2.26.0, spec 2026-10-13 Appendix A, s4).
 
     A failure that names no refusal proves nothing: it may be no write at
     all, or fail for another reason (codex review of #208, round 6).
@@ -865,10 +868,10 @@ def refused_attempts(
     (``codex-cli <cli_version>``, the same string :func:`headless_agents.
     registry.probe` returns); without it the rollout is never consulted, so
     every lot-1 test of this function keeps its original meaning. ``workspace``
-    is optional and codex-only too: when given, it tightens the rollout's
+    is used by codex and vibe: when given, it tightens the rollout's
     ``writable_roots`` check (:func:`_matches_write_policy`) to also refuse an
-    entry naming the workspace itself; every other rail, and a codex caller
-    that omits it, ignore it.
+    entry naming the workspace itself. For vibe, it resolves relative paths;
+    without a workspace, relative paths are not evidence.
     """
     if rail == "codex" and line is None:
         raise ValueError("codex evidence needs the probe line")
@@ -923,6 +926,26 @@ def refused_attempts(
             text = f"{info.get('output') or ''} {step.get('error') or ''} {reported or ''}".lower()
             if target in wanted and any(marker in text for marker in _AGY_REFUSALS):
                 found.add(wanted[str(target)])
+        elif rail == "vibe":
+            if event.get("type") != "effect" or not _vibe_denied(event):
+                continue
+            detail = event.get("detail")
+            detail = detail if isinstance(detail, dict) else {}
+            if detail.get("toolName") not in _VIBE_WRITE_EFFECTS:
+                continue
+            given = detail.get("input")
+            path = given.get("filePath") if isinstance(given, dict) else None
+            if not isinstance(path, str) or not path:
+                continue
+            if workspace is None and not Path(path).is_absolute():
+                continue
+            candidate = (
+                Path(path) if Path(path).is_absolute() or workspace is None else workspace / path
+            )
+            resolved = os.path.realpath(candidate)
+            for target in targets:
+                if os.path.realpath(target) == resolved:
+                    found.add(target)
     if rail == "codex" and rail_version is not None:
         assert line is not None  # codex already raised above when line is None
         found |= _rollout_refusals(
