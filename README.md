@@ -678,8 +678,13 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   resolved from the model, not the provider; see
   `docs/specs/2026-10-13-model-vendor-rule-design.md`) -- from the
   provenance `ha` records for its own commits -- and refuses the review otherwise (exit
-  `2`). The reviewers run in parallel, the judge weighs their findings, and the last line
-  of the deciding text is the verdict: exit `0` APPROVE, `6` CHANGES. `ha run build
+  `2`). A commit with a pre-change provenance record is refused while it remains in the
+  reviewed range. If `unconfined-writers.json` holds writers recorded before model
+  provenance, every commit without provenance is refused until an operator archives the
+  list by renaming it; nothing is deleted, and archiving gives up protection against those
+  legacy unconfined writes. The reviewers run in parallel, the judge weighs their findings,
+  and the last line of the deciding text is the verdict: exit `0` APPROVE, `6` CHANGES.
+  `ha run build
   --continue RUN_ID --findings REVIEW_ID` then hands those findings to the implementer, on
   the commit the review read; `ha show REVIEW_ID` renders the review, its vendor check
   included, from the state directory, and `ha show --dir PATH` a run directory's report.

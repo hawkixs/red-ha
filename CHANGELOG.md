@@ -56,8 +56,11 @@ member rode a brain-v42 tag.
   and the judge with the labs that wrote commits in the range, instead of comparing provider
   names. A model the table cannot name, or a `claude`/`codex` link whose environment sets a
   backend URL, is refused. A refusal names the slot (review or judge), role, provider, model
-  and lab. Reviews of ranges holding commits recorded before this change are refused until
-  those commits leave the range. `vendor_check` documents gain the `model-vendor` shape;
+  and lab. A commit with a pre-change provenance record is refused while it remains in the
+  reviewed range. If `unconfined-writers.json` holds writers recorded before model
+  provenance, every commit without provenance is refused until an operator archives the
+  list by renaming it; nothing is deleted, and archiving gives up protection against those
+  legacy unconfined writes. `vendor_check` documents gain the `model-vendor` shape;
   legacy documents still read.
 - Every CLI worker ha starts (codex, claude, opencode, agy) now exports `AI_AGENT=<provider>`,
   always replacing a value inherited from the parent session. The ReD rail resolves the

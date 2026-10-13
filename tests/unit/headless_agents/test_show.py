@@ -917,7 +917,7 @@ def test_vendors_line_renders_a_model_vendor_check() -> None:
     }
     assert show.vendors_line(check) == (
         "vendors authors deepseek (1 recorded commit) — "
-        "panel review opencode anthropic, judge agy google: independent"
+        "panel review r opencode anthropic/claude-x anthropic, judge j agy gemini-x google: independent"
     )
 
 

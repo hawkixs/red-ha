@@ -3,6 +3,7 @@ with them (spec 0.5.0 §3.8.4 steps 4-5, §3.8.6)."""
 
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from typing import Any
 import pytest
 
 from headless_agents import provenance
-from headless_agents.model_vendor import LinkRecord, shipped_table
+from headless_agents.model_vendor import LinkRecord, load_table, shipped_table
 from headless_agents.state import Unknown, publish
 from headless_agents.vendor import (
     AttributedCommit,
@@ -360,6 +361,85 @@ def test_an_unknown_panel_vendor_is_refused_with_the_line_to_add(tmp_path: Path)
             _panel(("review", "r", _link("openai-compat", "my-model"))),
             TABLE,
         )
+    with pytest.raises(VendorRefused) as error:
+        check_independence(
+            attribute(tmp_path, [(SHA_1, "x")]),
+            _panel(("review", "r", _link("openai-compat", "my-model"))),
+            TABLE,
+        )
+    assert 'provider = "openai-compat"' in str(error.value)
+    assert 'model = "my-model"' in str(error.value)
+
+
+def test_unknown_panel_hint_is_valid_toml_and_loadable(tmp_path: Path) -> None:
+    _record(tmp_path, SHA_1, _link("claude", "claude-x"))
+    with pytest.raises(VendorRefused) as error:
+        check_independence(
+            attribute(tmp_path, [(SHA_1, "x")]),
+            _panel(("review", "r", _link("openai-compat", "my-model"))),
+            TABLE,
+        )
+    suggestion = str(error.value).split("\n", 1)[1].replace("<lab>", "acme")
+    parsed = tomllib.loads(suggestion)
+    path = tmp_path / "vendors.toml"
+    path.write_text(suggestion, encoding="utf-8")
+    assert load_table(path).resolve("openai-compat", "my-model") == parsed["pair"][0]["vendor"]
+
+
+def test_unknown_panel_hint_without_model_suggests_no_pair(tmp_path: Path) -> None:
+    _record(tmp_path, SHA_1, _link("claude", "claude-x"))
+    with pytest.raises(VendorRefused, match="no model is configured") as error:
+        check_independence(
+            attribute(tmp_path, [(SHA_1, "x")]),
+            _panel(("review", "r", _link("openai-compat", ""))),
+            TABLE,
+        )
+    assert "[[pair]]" not in str(error.value)
+
+
+def test_legacy_unconfined_writers_get_a_dedicated_refusal(tmp_path: Path) -> None:
+    publish(
+        tmp_path / "unconfined-writers.json",
+        {
+            "writers": [
+                {"run_id": "a", "providers": ["claude"]},
+                {"run_id": "b", "providers": ["codex"]},
+                {
+                    "run_id": "c",
+                    "providers": ["agy"],
+                    "links": [{"provider": "agy", "model": "gemini-x", "switches": []}],
+                },
+            ]
+        },
+    )
+    commits = attribute(tmp_path, [(SHA_1, "handwritten")])
+    with pytest.raises(VendorRefused) as error:
+        check_independence(commits, _panel(("review", "r", _link("agy", "gemini-x"))), TABLE)
+    message = str(error.value)
+    assert "unconfined-writers.json" in message
+    assert "2 legacy writer" in message
+    assert "Archive the list" in message
+
+
+def test_unconfined_writers_with_links_do_not_get_legacy_refusal(tmp_path: Path) -> None:
+    publish(
+        tmp_path / "unconfined-writers.json",
+        {
+            "writers": [
+                {
+                    "run_id": "c",
+                    "providers": ["codex"],
+                    "links": [{"provider": "codex", "model": "gpt-6", "switches": []}],
+                }
+            ]
+        },
+    )
+    checked = check_independence(
+        attribute(tmp_path, [(SHA_1, "handwritten")]),
+        _panel(("review", "r", _link("agy", "gemini-x"))),
+        TABLE,
+    )
+    assert checked.authors == ("openai",)
 
 
 def test_a_switched_panel_member_is_refused(tmp_path: Path) -> None:

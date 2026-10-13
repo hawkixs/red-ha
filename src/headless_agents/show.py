@@ -520,9 +520,14 @@ def _model_vendor_line(check: Mapping[str, object]) -> str:
             for link in links:
                 if not isinstance(link, dict):
                     continue
-                provider, vendor = link.get("provider"), link.get("vendor")
-                if isinstance(provider, str) and isinstance(vendor, str):
-                    panel_parts.append(f"{slot} {provider} {vendor}")
+                role = member.get("role")
+                provider, model, vendor = (
+                    link.get("provider"),
+                    link.get("model"),
+                    link.get("vendor"),
+                )
+                if all(isinstance(value, str) for value in (role, provider, model, vendor)):
+                    panel_parts.append(f"{slot} {role} {provider} {model or '(default)'} {vendor}")
     return (
         f"vendors authors {', '.join(authors) or 'none'}{_commits_detail(commits)} — panel "
         f"{', '.join(panel_parts) or 'none'}: independent"

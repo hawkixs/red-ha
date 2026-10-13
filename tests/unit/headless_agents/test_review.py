@@ -1214,7 +1214,7 @@ def test_after_a_legacy_unconfined_write_the_review_is_refused(world: World) -> 
         },
     )
     world.commit_by_hand()
-    with pytest.raises(UsageError, match="predates model provenance"):
+    with pytest.raises(UsageError, match="unconfined-writers.json"):
         world.review()
     assert all(not agent.specs for agent in world.agents.values())
 

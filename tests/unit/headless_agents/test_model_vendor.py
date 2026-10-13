@@ -153,6 +153,9 @@ def test_backend_switches_are_named_by_presence() -> None:
     ("argv", "named"),
     [
         (["codex", "exec", "-c", 'model_provider="oss"'], ("model_provider",)),
+        (["codex", "exec", "--config", 'model_provider="oss"'], ("model_provider",)),
+        (["codex", "exec", '--config=model_providers.x.base_url="u"'], ("model_providers.*",)),
+        (["codex", "exec", '-c=model_provider="oss"'], ("model_provider",)),
         (["codex", "exec", "-c", 'model_providers.x.base_url="u"'], ("model_providers.*",)),
         (["codex", "exec", "--profile", "p"], ("--profile",)),
         (["codex", "exec", "-p", "p"], ("--profile",)),

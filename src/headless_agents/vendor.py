@@ -18,6 +18,7 @@ commits of ``<merge-base>..<head>`` and their subjects, then calls
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -51,6 +52,7 @@ class AttributedCommit:
     made_by: str
     providers: tuple[str, ...]
     links: tuple[LinkRecord, ...] | None = None
+    legacy_writers: int = 0
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -284,7 +286,9 @@ def _attribution_ha_makes(commit: AttributedCommit) -> bool:
     return commit.made_by == "unknown" and bool(commit.providers)
 
 
-def _unconfined_writers(state: Path) -> tuple[tuple[str, ...], tuple[LinkRecord, ...] | None]:
+def _unconfined_writers(
+    state: Path,
+) -> tuple[tuple[str, ...], tuple[LinkRecord, ...] | None, int]:
     """Every unconfined writing link, or legacy providers when a writer lacks links."""
     path = state / UNCONFINED_WRITERS
     try:
@@ -295,7 +299,7 @@ def _unconfined_writers(state: Path) -> tuple[tuple[str, ...], tuple[LinkRecord,
             "hand-written; recover the file by hand"
         ) from None
     if document is None:
-        return (), ()
+        return (), (), 0
     if document.get("unreadable_before"):
         # A write found the list unreadable and started a new one: the writers it lost are
         # unknown, and unknown is never empty (§3.8.1).
@@ -309,6 +313,7 @@ def _unconfined_writers(state: Path) -> tuple[tuple[str, ...], tuple[LinkRecord,
     found: list[str] = []
     found_links: list[LinkRecord] = []
     legacy = False
+    legacy_writers = 0
     for writer in writers:
         # Every writer ha records names its run and at least one provider: a writer without
         # one would leave the union empty and presume a hand where an unconfined write ran.
@@ -330,11 +335,12 @@ def _unconfined_writers(state: Path) -> tuple[tuple[str, ...], tuple[LinkRecord,
             raise VendorRefused(f"{path} is malformed: recover it by hand") from None
         if links is None:
             legacy = True
+            legacy_writers += 1
         else:
             found_links.extend(link for link in links if link not in found_links)
     if legacy:
-        return tuple(found), None
-    return tuple(link.provider for link in found_links), tuple(found_links)
+        return tuple(found), None, legacy_writers
+    return tuple(link.provider for link in found_links), tuple(found_links), 0
 
 
 def _record_links(
@@ -389,7 +395,7 @@ def _recorded(sha: str, record: Mapping[str, object]) -> AttributedCommit:
 
 def attribute(state: Path, commits: Sequence[tuple[str, str]]) -> tuple[AttributedCommit, ...]:
     """Every ``(sha, subject)`` of the range attributed (§3.8.4 step 4), in the given order."""
-    writers: tuple[tuple[str, ...], tuple[LinkRecord, ...] | None] | None = None
+    writers: tuple[tuple[str, ...], tuple[LinkRecord, ...] | None, int] | None = None
     attributed = []
     for sha, subject in commits:
         try:
@@ -406,11 +412,16 @@ def attribute(state: Path, commits: Sequence[tuple[str, str]]) -> tuple[Attribut
             )
         if writers is None:
             writers = _unconfined_writers(state)
-        providers, links = writers
+        providers, links, legacy_writers = writers
         made_by = "unknown" if providers else "hand"
         attributed.append(
             AttributedCommit(
-                sha=sha, run_id=None, made_by=made_by, providers=providers, links=links
+                sha=sha,
+                run_id=None,
+                made_by=made_by,
+                providers=providers,
+                links=links,
+                legacy_writers=legacy_writers,
             )
         )
     return tuple(attributed)
@@ -431,9 +442,16 @@ def _why_unknown(link: ResolvedLink) -> str:
             f"its vendor is unknown: its environment sets {', '.join(link.switches)}, "
             "which can point it at another backend"
         )
+    if not link.model:
+        return (
+            f"its vendor is unknown: no model is configured for {link.provider}; "
+            "set one for this role or in models.toml"
+        )
     return (
-        f"its vendor is unknown; declare it in vendors.toml: "
-        f'[[pair]] provider = "{link.provider}" model = "{link.model}" vendor = "<lab>"'
+        # json.dumps quotes and escapes like a TOML basic string, so the hint stays pasteable.
+        "its vendor is unknown; declare it in vendors.toml:\n[[pair]]\n"
+        f"provider = {json.dumps(link.provider)}\nmodel = {json.dumps(link.model)}\n"
+        'vendor = "<lab>"'
     )
 
 
@@ -447,6 +465,15 @@ def check_independence(
     authors: set[str] = set()
     for commit in commits:
         if commit.links is None:
+            if commit.made_by == "unknown":
+                raise VendorRefused(
+                    f"commit {commit.sha[:12]} has no provenance and unconfined-writers.json "
+                    f"holds {commit.legacy_writers} legacy writer(s) recorded before model "
+                    "provenance: their labs cannot be proven. Archive the list (rename it, "
+                    "e.g. unconfined-writers.legacy-<date>.json; nothing is deleted) to start "
+                    "a new one; archiving gives up the protection against those legacy "
+                    "unconfined writes."
+                )
             raise VendorRefused(
                 f"commit {commit.sha[:12]} predates model provenance: its authors' labs "
                 "cannot be proven"

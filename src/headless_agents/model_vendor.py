@@ -122,8 +122,13 @@ def codex_argv_switches(argv: Sequence[str]) -> tuple[str, ...]:
     for index, arg in enumerate(argv):
         if arg in _CODEX_FLAGS:
             found.add(_CODEX_FLAGS[arg])
-        if arg == "-c" and index + 1 < len(argv):
-            key = argv[index + 1].split("=", 1)[0].strip()
+        config_value = None
+        if arg in {"-c", "--config"} and index + 1 < len(argv):
+            config_value = argv[index + 1]
+        elif arg.startswith(("-c=", "--config=")):
+            config_value = arg.split("=", 1)[1]
+        if config_value is not None:
+            key = config_value.split("=", 1)[0].strip()
             if key == "model_provider":
                 found.add("model_provider")
             elif key.startswith("model_providers."):
