@@ -1,0 +1,51 @@
+{
+  "digest": "sha256:92c31ff36fd74809262574312d4d2b8de28d0c2e95cbf83a96c6ead0af2ccb54",
+  "idempotency_key": "review_verdict:150324ce814ad5e543e2fd89ec9ff9ab10eb3027:115351731803",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": true,
+      "carry_forwards": {
+        "addressed": [],
+        "deferred": [
+          "CF-4-3"
+        ]
+      },
+      "check_run_id": 115351731803,
+      "diff_truncated": false,
+      "finding_count": 1,
+      "findings": [
+        {
+          "class": "blocker",
+          "evidence": "CF-11-1 is an open carry-forward: list it under `## Carry-forwards` as one line, CF-<pr>-<n>: addressed | CF-<pr>-<n>: deferred: <reason>",
+          "file": "(pull request description)",
+          "id": "F-12-1",
+          "line": null,
+          "severity": "blocking",
+          "status": "new",
+          "title": "CF-11-1 not accounted for"
+        }
+      ],
+      "independent": true,
+      "mode": "deep",
+      "not_reviewed": [],
+      "pr": 12,
+      "providers": [
+        "agy",
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "150324ce814ad5e543e2fd89ec9ff9ab10eb3027",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "request_changes"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T14:43:30.840688Z",
+  "schema_version": 1
+}

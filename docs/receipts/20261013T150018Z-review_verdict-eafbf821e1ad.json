@@ -1,0 +1,103 @@
+{
+  "digest": "sha256:eafbf821e1adbe0bcf0d85129103533292d31d9f82fee5331e56ab8654fe1709",
+  "idempotency_key": "review_verdict:150324ce814ad5e543e2fd89ec9ff9ab10eb3027:115360444460",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": false,
+      "carry_forwards": {
+        "addressed": [
+          "CF-11-1"
+        ],
+        "deferred": [
+          "CF-4-3"
+        ]
+      },
+      "check_run_id": 115360444460,
+      "diff_truncated": false,
+      "finding_count": 6,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "In codex_argv_switches, _CODEX_FLAGS checks exact membership (arg in _CODEX_FLAGS), matching flags like --profile <name> or --local-provider <name>, but not inline forms such as --profile=<name> or --local-provider=<name>, unlike -c and --config which explicitly support both whitespace and '=' delim",
+          "file": "src/headless_agents/model_vendor.py",
+          "id": "F-12-2",
+          "line": 122,
+          "severity": "minor",
+          "status": "new",
+          "title": "codex_argv_switches does not inspect flags passed with inline equals"
+        },
+        {
+          "class": "note",
+          "evidence": "shipped_table() reads and decodes vendors.toml via resources.files on every call without caching at module scope. Review execution reuses plan.vendor_table so runtime overhead during reviews is avoided, but repeated calls in test suites or ad-hoc table lookups perform redundant file I/O.",
+          "file": "src/headless_agents/model_vendor.py",
+          "id": "F-12-3",
+          "line": 245,
+          "severity": "minor",
+          "status": "new",
+          "title": "shipped_table re-reads and re-parses vendors.toml on every call"
+        },
+        {
+          "class": "note",
+          "evidence": "VendorTable is decorated with @dataclass(frozen=True), but providers, orgs, opencode, and pairs contain standard mutable dict objects rather than immutable mappings (such as MappingProxyType), allowing callers to modify table mappings in place and desynchronize the digest property.",
+          "file": "src/headless_agents/model_vendor.py",
+          "id": "F-12-4",
+          "line": 144,
+          "severity": "minor",
+          "status": "new",
+          "title": "VendorTable declared frozen but holds mutable dict fields"
+        },
+        {
+          "class": "note",
+          "evidence": "test_unknown_panel_hint_is_valid_toml_and_loadable only proves the suggested [[pair]] document parses and that load_table resolves the suggested pair; no test in this part shows an operator pair for a shipped-unknown model turning a refusal into a pass, nor how an operator file merges with the shipp",
+          "file": "tests/unit/headless_agents/test_vendor.py",
+          "id": "F-12-5",
+          "line": 368,
+          "severity": "minor",
+          "status": "new",
+          "title": "Operator vendors.toml override path not exercised in this part"
+        },
+        {
+          "class": "note",
+          "evidence": "Only the panel side of the switch rule is pinned here (test_a_switched_panel_member_is_refused), while test_write_flow.py proves switched links do get recorded into provenance. Question to check in the unread part: does check_independence refuse an author link carrying non-empty switches, and is tha",
+          "file": "tests/unit/headless_agents/test_vendor.py",
+          "id": "F-12-6",
+          "line": 432,
+          "severity": "minor",
+          "status": "new",
+          "title": "Switched author links unpinned in this part"
+        },
+        {
+          "class": "blocker",
+          "evidence": "CF-11-1 is an open carry-forward: list it under `## Carry-forwards` as one line, CF-<pr>-<n>: addressed | CF-<pr>-<n>: deferred: <reason>",
+          "file": "(pull request description)",
+          "id": "F-12-1",
+          "line": null,
+          "severity": "blocking",
+          "status": "fixed",
+          "title": "CF-11-1 not accounted for"
+        }
+      ],
+      "independent": true,
+      "mode": "deep",
+      "not_reviewed": [],
+      "pr": 12,
+      "providers": [
+        "agy",
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 2,
+      "sha": "150324ce814ad5e543e2fd89ec9ff9ab10eb3027",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T15:00:18.482742Z",
+  "schema_version": 1
+}
