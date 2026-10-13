@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -178,3 +179,22 @@ def test_a_clean_operator_environment_has_no_switch() -> None:
     assert "CLAUDE_CODE_USE_VERTEX" not in environment
     assert backend_switches("claude", environment) == ()
     assert backend_switches("codex", environment) == ()
+
+
+@pytest.mark.parametrize("vendor", ["OpenAI", "open ai", "openai ", "-acme", "acme_lab", "é"])
+def test_an_operator_vendor_must_be_a_lowercase_lab_name(tmp_path: Path, vendor: str) -> None:
+    # A vendor differing only in case or spacing would pass as another lab (fail open).
+    path = _operator(
+        tmp_path,
+        f'[[pair]]\nprovider = "openai-compat"\nmodel = "gpt-local"\nvendor = "{vendor}"\n',
+    )
+    with pytest.raises(VendorTableError, match="lowercase"):
+        load_table(path)
+
+
+def test_every_shipped_vendor_is_a_lowercase_lab_name() -> None:
+    table = shipped_table()
+    names = set(table.orgs.values()) | {v for _, v in table.bare}
+    names |= {e["vendor"] for e in table.providers.values() if "vendor" in e}
+    names |= {e["vendor"] for e in table.opencode.values() if "vendor" in e}
+    assert all(re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) for name in names), names

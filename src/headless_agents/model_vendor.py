@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -23,6 +24,7 @@ UNKNOWN: Final = "unknown"
 VENDORS_FILE_NAME: Final = "vendors.toml"
 _GRAMMARS: Final = frozenset({"org", "bare", "opencode"})
 _OPENCODE_GRAMMARS: Final = frozenset({"org", "bare"})
+_VENDOR_NAME: Final = re.compile(r"[a-z0-9][a-z0-9-]*")
 ENV_SWITCHES: Final[Mapping[str, frozenset[str]]] = {
     "codex": frozenset({"OPENAI_BASE_URL", "OPENAI_API_BASE"}),
     "claude": frozenset({"ANTHROPIC_BASE_URL"}),
@@ -191,8 +193,12 @@ class VendorTable:
 
 
 def _text(value: object, where: str) -> str:
-    if not isinstance(value, str) or not value or value == UNKNOWN:
-        raise VendorTableError(f"{where}: expected a non-empty vendor name")
+    # Vendors are compared as strings: one differing only in case or spacing would pass
+    # as another lab, so every name is a lowercase lab name (fail closed, spec D3).
+    if not isinstance(value, str) or not _VENDOR_NAME.fullmatch(value) or value == UNKNOWN:
+        raise VendorTableError(
+            f"{where}: expected a lowercase lab name ([a-z0-9][a-z0-9-]*), got {value!r}"
+        )
     return value
 
 
