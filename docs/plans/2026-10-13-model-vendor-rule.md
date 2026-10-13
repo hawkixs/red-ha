@@ -508,9 +508,13 @@ from headless_agents.engine import operator_environment
 from headless_agents.model_vendor import backend_switches
 
 
-def test_the_production_child_environment_carries_only_real_switches() -> None:
+def test_the_production_child_environment_carries_only_real_switches(tmp_path: Path) -> None:
     clean = operator_environment({"PATH": "/bin", "HOME": "/h", "CLAUDE_CODE_USE_BEDROCK": "1"})
-    spec = RunSpec(prompt="P", model="m", environment=clean)
+    # build_command requires extra["mcp_config_path"] (claude.py ClaudeProvider.build_command).
+    spec = RunSpec(
+        prompt="P", model="m", environment=clean,
+        extra={"mcp_config_path": tmp_path / "mcp.json"},
+    )
     env = claude.ClaudeProvider().child_environment(spec, {})
     assert env is not None and backend_switches("claude", env) == ()
     claude.ClaudeProvider().build_command(spec)  # builds; claude has no argv switch (A1)
