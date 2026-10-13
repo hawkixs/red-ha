@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final, Literal
 
+from .model_vendor import LinkRecord
 from .state import Unknown, create_once, read, read_optional
 
 MadeBy = Literal["engine", "agent", "hook", "unknown"]
@@ -34,6 +35,7 @@ def record(
     lineage: str,
     made_by: MadeBy,
     providers: Sequence[str],
+    links: Sequence[LinkRecord],
 ) -> None:
     """Record ``sha`` once; :class:`FileExistsError` if it is already recorded."""
     create_once(
@@ -44,6 +46,7 @@ def record(
             "lineage": lineage,
             "made_by": made_by,
             "providers": list(providers),
+            "links": [link.to_document() for link in links],
         },
     )
 

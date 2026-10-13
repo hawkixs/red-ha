@@ -305,6 +305,7 @@ def test_a_continuation_commits_on_the_lineages_branch(world: World) -> None:
         "lineage": owner,
         "made_by": "engine",
         "providers": ["codex"],
+        "links": [{"provider": "codex", "model": "codex-default", "switches": []}],
     }
     patch = (second.run_dir / write_flow.PATCH_FILE).read_text()
     assert "+VERBOSE = True" in patch and "VERBOSE = False" not in patch

@@ -14,7 +14,10 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from importlib import resources
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from .roles import Role
 
 UNKNOWN: Final = "unknown"
 VENDORS_FILE_NAME: Final = "vendors.toml"
@@ -24,6 +27,48 @@ ENV_SWITCHES: Final[Mapping[str, frozenset[str]]] = {
     "codex": frozenset({"OPENAI_BASE_URL", "OPENAI_API_BASE"}),
     "claude": frozenset({"ANTHROPIC_BASE_URL"}),
 }
+
+
+@dataclass(frozen=True)
+class LinkRecord:
+    """One link of a writing or reviewing role: provider, frozen model, backend switches."""
+
+    provider: str
+    model: str
+    switches: tuple[str, ...]
+
+    def to_document(self) -> dict[str, object]:
+        return {"provider": self.provider, "model": self.model, "switches": list(self.switches)}
+
+    @classmethod
+    def from_document(cls, raw: object) -> LinkRecord | None:
+        if not isinstance(raw, dict) or set(raw) != {"provider", "model", "switches"}:
+            return None
+        provider, model, switches = raw["provider"], raw["model"], raw["switches"]
+        if (
+            not isinstance(provider, str)
+            or not provider
+            or not isinstance(model, str)
+            or not isinstance(switches, list)
+            or not all(isinstance(s, str) and s for s in switches)
+        ):
+            return None
+        return cls(provider, model, tuple(switches))
+
+
+def role_links(
+    role: Role, models: Mapping[str, str], environment: Mapping[str, str]
+) -> tuple[LinkRecord, ...]:
+    return tuple(
+        LinkRecord(
+            link.provider,
+            models.get(link.provider, ""),
+            backend_switches(link.provider, environment),
+        )
+        for link in role.links
+    )
+
+
 _CODEX_FLAGS: Final = {
     "--profile": "--profile",
     "-p": "--profile",
@@ -194,6 +239,7 @@ def load_table(operator_file: Path | None) -> VendorTable:
 
 __all__ = [
     "ENV_SWITCHES",
+    "LinkRecord",
     "UNKNOWN",
     "VENDORS_FILE_NAME",
     "VendorTable",
@@ -201,5 +247,6 @@ __all__ = [
     "backend_switches",
     "codex_argv_switches",
     "load_table",
+    "role_links",
     "shipped_table",
 ]

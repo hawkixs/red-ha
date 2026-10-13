@@ -44,6 +44,7 @@ from .git_tripwire import GitTampered, Tripwire, resolve_git_dir
 from .gitops import git
 from .lineage import LineageState, PendingWrite
 from .locks import AdmissionWait, LockTimeout, Rank, held, is_free
+from .model_vendor import role_links
 from .profile import Workspace
 from .provenance import MadeBy
 from .repo import RepoIdentity
@@ -421,6 +422,10 @@ def _publish_unconfined_intent(write: _Write) -> None:
         "run_id": write.run_id,
         "repository": str(write.identity.work_tree),
         "providers": list(write.plan.role.providers),
+        "links": [
+            link.to_document()
+            for link in role_links(write.plan.role, write.plan.models, write.plan.environment)
+        ],
     }
     publish(write.state / UNCONFINED_INTENT, record)
     path = write.state / UNCONFINED_WRITERS
@@ -878,6 +883,7 @@ def _publish(
                 lineage=write.owner,
                 made_by=made_by,
                 providers=providers,
+                links=role_links(write.plan.role, write.plan.models, write.plan.environment),
             )
         except FileExistsError:
             pass
@@ -1084,6 +1090,7 @@ def run_write_step(
                         lineage=write.owner,
                         made_by="agent",
                         providers=plan.role.providers,
+                        links=role_links(plan.role, plan.models, plan.environment),
                     )
                 except FileExistsError:
                     pass

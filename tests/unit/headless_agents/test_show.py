@@ -11,6 +11,7 @@ import pytest
 
 from headless_agents import lineage as lineages
 from headless_agents import locks, provenance, reviews, show
+from headless_agents.model_vendor import LinkRecord
 from headless_agents.report import RUN_KEYS
 from headless_agents.runs import Registry
 from headless_agents.vendor import AttributedCommit, VendorCheck
@@ -114,10 +115,16 @@ class Home:
             ),
         )
         provenance.record(
-            self.state, SHA_1, run_id=RUN, lineage=RUN, made_by="engine", providers=[]
+            self.state, SHA_1, run_id=RUN, lineage=RUN, made_by="engine", providers=[], links=()
         )
         provenance.record(
-            self.state, SHA_2, run_id=OTHER, lineage=RUN, made_by="engine", providers=["codex"]
+            self.state,
+            SHA_2,
+            run_id=OTHER,
+            lineage=RUN,
+            made_by="engine",
+            providers=["codex"],
+            links=(LinkRecord("codex", "", ()),),
         )
         (entry.run_dir / "run.json").write_text(
             json.dumps(self.report(target={"kind": "role", "name": "implementer"}, **report))

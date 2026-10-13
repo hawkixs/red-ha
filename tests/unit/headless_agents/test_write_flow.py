@@ -111,12 +111,13 @@ class World:
         repo: Path | None = None,
         base: str | None = None,
         output_schema: dict[str, object] | None = None,
+        model: str | None = None,
     ) -> engine.Plan:
         request = Request(
             target="codex",
             prompt="improve app",
             stdin_is_tty=False,
-            overrides=Overrides(),
+            overrides=Overrides(model=model),
             base=None,
             repo=repo,
             run_dir=None,
@@ -212,6 +213,7 @@ def test_a_committed_write(world: World) -> None:
         "lineage": run_id,
         "made_by": "engine",
         "providers": ["codex"],
+        "links": [{"provider": "codex", "model": "codex-default", "switches": []}],
     }
     assert world.registry().resolve(run_id).lineage == run_id
     patch = (outcome.run_dir / write_flow.PATCH_FILE).read_text()
@@ -308,6 +310,46 @@ def test_a_failed_step_with_changes_commits_a_residue(world: World) -> None:
     record_ = provenance.lookup(world.state, tip)
     assert record_ is not None and record_["made_by"] == "engine"
     assert lineage.load(world.state, outcome.run_id).members[outcome.run_id] == "failed"
+
+
+def test_provenance_links_record_environment_switches(world: World) -> None:
+    world.agent.edit = _edit_app
+    planned = world.write_plan()
+    planned = replace(planned, environment={**planned.environment, "OPENAI_BASE_URL": "http://x"})
+    outcome = execute(planned, say=world.said.append)
+    tip = _git(world.repo, "rev-parse", f"ha/{outcome.run_id}").strip()
+    record_ = provenance.lookup(world.state, tip)
+    assert record_ is not None
+    assert record_["links"] == [
+        {"provider": "codex", "model": "codex-default", "switches": ["OPENAI_BASE_URL"]}
+    ]
+
+
+def test_provenance_links_keep_the_planned_model_after_config_changes(world: World) -> None:
+    world.agent.edit = _edit_app
+    planned = world.write_plan(model="gpt-6-override")
+    (world.home / ".config" / "ha" / "models.toml").write_text('codex = "changed-later"\n')
+    outcome = execute(planned, say=world.said.append)
+    tip = _git(world.repo, "rev-parse", f"ha/{outcome.run_id}").strip()
+    record_ = provenance.lookup(world.state, tip)
+    assert record_ is not None
+    assert record_["links"] == [{"provider": "codex", "model": "gpt-6-override", "switches": []}]
+
+
+def test_provenance_links_keep_the_planned_default_model_after_config_changes(
+    world: World,
+) -> None:
+    """Spec §4: the model models.toml gave at planning is what provenance records."""
+    world.agent.edit = _edit_app
+    planned = world.write_plan()
+    planned_model = planned.models["codex"]
+    (world.home / ".config" / "ha" / "models.toml").write_text('codex = "changed-later"\n')
+    outcome = execute(planned, say=world.said.append)
+    tip = _git(world.repo, "rev-parse", f"ha/{outcome.run_id}").strip()
+    record_ = provenance.lookup(world.state, tip)
+    assert record_ is not None
+    assert planned_model != "changed-later"
+    assert record_["links"] == [{"provider": "codex", "model": planned_model, "switches": []}]
 
 
 def test_a_failed_step_without_changes_commits_nothing(world: World) -> None:
@@ -1173,11 +1215,17 @@ def test_an_unconfined_write_publishes_its_intent_then_removes_it(
         "run_id": outcome.run_id,
         "repository": str(unconfined.repo),
         "providers": ["codex"],
+        "links": [{"provider": "codex", "model": "codex-default", "switches": []}],
     }
     assert not (unconfined.state / write_flow.UNCONFINED_INTENT).exists()
     writers = json.loads((unconfined.state / write_flow.UNCONFINED_WRITERS).read_text())
     assert writers["writers"] == [
-        {"run_id": outcome.run_id, "repository": str(unconfined.repo), "providers": ["codex"]}
+        {
+            "run_id": outcome.run_id,
+            "repository": str(unconfined.repo),
+            "providers": ["codex"],
+            "links": [{"provider": "codex", "model": "codex-default", "switches": []}],
+        }
     ]
     assert lineage.load(unconfined.state, outcome.run_id).members[outcome.run_id] == "committed"
 

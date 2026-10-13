@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from headless_agents import provenance
+from headless_agents.model_vendor import LinkRecord
 from headless_agents.state import Unknown, publish
 from headless_agents.vendor import (
     AttributedCommit,
@@ -25,13 +26,33 @@ OTHER = "20260926T110000-bbbbbbbb"
 
 
 def _record(state: Path, sha: str, providers: list[str], made_by: str = "engine") -> None:
-    provenance.record(state, sha, run_id=RUN, lineage=RUN, made_by=made_by, providers=providers)  # type: ignore[arg-type]
+    provenance.record(
+        state,
+        sha,
+        run_id=RUN,
+        lineage=RUN,
+        made_by=made_by,  # type: ignore[arg-type]
+        providers=providers,
+        links=tuple(LinkRecord(p, "", ()) for p in providers),
+    )
 
 
 def _writers(state: Path, *providers: list[str]) -> None:
     publish(
         state / "unconfined-writers.json",
-        {"writers": [{"run_id": OTHER, "repository": "/r", "providers": p} for p in providers]},
+        {
+            "writers": [
+                {
+                    "run_id": OTHER,
+                    "repository": "/r",
+                    "providers": p,
+                    "links": [
+                        {"provider": provider, "model": "", "switches": []} for provider in p
+                    ],
+                }
+                for p in providers
+            ]
+        },
     )
 
 
