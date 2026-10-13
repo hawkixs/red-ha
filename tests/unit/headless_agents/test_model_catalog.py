@@ -135,7 +135,7 @@ def test_every_provider_accepts_a_model_table_without_effort(
     assert result.entries[0].tasks == (("build", None),)
 
 
-@pytest.mark.parametrize("provider", ("codex", "opencode"))
+@pytest.mark.parametrize("provider", ("codex", "opencode", "vibe"))
 @pytest.mark.parametrize("effort", EFFORTS)
 def test_allowed_provider_effort_is_kept_without_model_specific_check(
     tmp_path: Path,
@@ -173,7 +173,7 @@ def test_structure_errors_name_the_key(
         ("codex", "future"),
         ("opencode", "future"),
         ("agy", "high"),
-        ("vibe", "high"),
+        ("vibe", "future"),
         ("claude", "high"),
         ("openrouter", "high"),
         ("mistral", "high"),

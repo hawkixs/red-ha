@@ -31,6 +31,7 @@ member rode a brain-v42 tag.
 
 - `vibe` CLI rail for Mistral Vibe 2.26.0 (read-only, write and write-with-shell profiles;
   isolation and confinement proofs; no usage data).
+  `--effort` sets the Vibe model's `thinking` level, and `ha prove vibe` runs with `low`.
 
 ### Fixed
 

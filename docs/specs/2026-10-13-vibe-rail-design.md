@@ -436,3 +436,29 @@ The CHANGELOG gets an entry under Unreleased.
 - **Recommended model.** `mistral-large-4` is the model the documentation and the live tests
   use.
 
+### A3 — Reasoning effort and the confinement prompt (2026-10-13, Task 8)
+
+Two findings from the first live `ha prove vibe` with `mistral-large-4` replace the earlier
+"`spec.reasoning_effort` is not used".
+
+- **Effort.** Vibe 2.26.0 has no per-run effort flag, but each `[[models]]` entry takes a
+  `thinking` level (`off`, `low`, `medium`, `high`, `max`). Vibe sends Mistral
+  `reasoning_effort = "none"` for `low` and `"high"` for `medium`, `high` and `max`; `off`
+  sends nothing, and Large 4 then reasons at its own default. Measured on the confinement
+  probe:
+  - `low`: 4 runs out of 4 complete in 13 to 18 s, with the control written and the outside
+    write attempted, then denied;
+  - the default (`off`): 0 runs out of 3 attempted the outside write, and in three
+    `ha prove` attempts the first turn took up to 279 s, so the 300 s deadline (124) was
+    reached.
+
+  ha now maps its effort vocabulary onto `thinking` (`thinking_for`):
+  `none`/`minimal`/`low` → `low`, `medium` → `medium`, `high` → `high`,
+  `xhigh`/`max`/`ultra` → `max`. An unknown effort is refused before start (exit 2), and
+  `vibe` joins the catalog's effort-optional providers. The confinement proof already runs
+  at `reasoning_effort="low"`.
+- **Confinement prompt.** The shared prompt offered a shell command for each file. The
+  probe's write profile has no shell, so Vibe denied `bash` and the control was never
+  written ("no control written"). Vibe now gets its own prompt: `write_file` for both
+  files, with the whole new content, and no shell command.
+

@@ -290,6 +290,12 @@ recommended Large 4 reasoning model, measured on 2026-10-13; `mistral-large-late
 alias of `mistral-large-2512` (Large 3), not Large 4.
 `ha prove vibe`, `ha prove --stale` and `ha providers --update` need `vibe = "<model>"`
 in `models.toml`, for example `mistral-large-4`.
+`--effort` (or a role's `effort`) becomes the model's `thinking` level in Vibe's per-run
+config: `none`, `minimal` and `low` give `low`; `medium` gives `medium`; `high` gives
+`high`; `xhigh`, `max` and `ultra` give `max`. Vibe 2.26.0 sends Mistral no reasoning for
+`low` and full reasoning for every other level. Measured on 2026-10-13 with Large 4:
+`--effort low` ran the confinement probe in 13 to 18 s, while Large 4's own default
+reasoned for up to 279 s before its first tool call.
 
 | Profile | Enabled Vibe tools |
 |---|---|
@@ -767,8 +773,9 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   `tasks` entry or in `cost` is likewise a warning naming the key; every other departure
   (a missing field, a wrong type, a value outside a closed list, a duplicate task kind, a
   model value that is not a table) is an error naming the key. `tasks[].effort` follows a
-  per-provider rule: optional for `codex` and for `opencode` (whose value becomes its own
-  `--variant`), and in both cases one of `none`, `minimal`, `low`, `medium`, `high`,
+  per-provider rule: optional for `codex`, for `opencode` (whose value becomes its own
+  `--variant`) and for `vibe` (whose value becomes its model's `thinking` level), and in
+  every case one of `none`, `minimal`, `low`, `medium`, `high`,
   `xhigh`, `max`, `ultra` -- ha performs no model-specific check beyond that closed list;
   forbidden for `agy`, `claude`,
   `openrouter`, `mistral`, `nvidia` and `openai-compat`, an error even when the value would

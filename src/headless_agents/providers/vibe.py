@@ -146,9 +146,41 @@ def _dump_toml(document: Mapping[str, object]) -> str:
     return text
 
 
-def vibe_config(*, model: str, permissions: Mapping[str, str]) -> str:
+#: Vibe 2.26.0's per-model ``thinking`` levels (``vibe/config_values.py``). Vibe maps
+#: them to Mistral's ``reasoning_effort``: low -> "none", medium/high/max -> "high";
+#: "off" sends none and the model reasons at its own default.
+THINKING_LEVELS: Final = frozenset({"off", "low", "medium", "high", "max"})
+#: ha's effort vocabulary (model_catalog.EFFORTS) onto Vibe's thinking levels.
+_THINKING_BY_EFFORT: Final[Mapping[str, str]] = {
+    "none": "low",
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "max",
+    "max": "max",
+    "ultra": "max",
+}
+
+
+def thinking_for(effort: str) -> str:
+    """Vibe's ``thinking`` level for ha's reasoning ``effort`` (amendment A3).
+
+    Measured 2026-10-13 on Vibe 2.26.0 with Large 4: "low" ran the confinement
+    probe 4/4 in 13-18 s; the default ("off") ran 0/3 complete, up to 279 s of
+    reasoning before the first tool call.
+    """
+    try:
+        return _THINKING_BY_EFFORT[effort]
+    except KeyError:
+        raise ValueError(f"vibe: unsupported reasoning effort {effort!r}") from None
+
+
+def vibe_config(*, model: str, permissions: Mapping[str, str], thinking: str | None = None) -> str:
     """Build Vibe's isolated per-run configuration."""
     validate_model(model)
+    if thinking is not None and thinking not in THINKING_LEVELS:
+        raise ValueError(f"vibe: unsupported thinking level {thinking!r}")
     for tool, permission in permissions.items():
         if permission not in _PERMISSIONS or not re.fullmatch(r"[a-z_]+", tool):
             raise ValueError(f"vibe: unsupported permission {permission!r} for tool {tool!r}")
@@ -164,7 +196,10 @@ def vibe_config(*, model: str, permissions: Mapping[str, str]) -> str:
         "vibe_base_url": CLOSED_LOOPBACK,
         "vibe_code_sessions_base_url": CLOSED_LOOPBACK,
         "console_base_url": CLOSED_LOOPBACK,
-        "models": [{"name": model, "provider": "mistral", "alias": model}],
+        "models": [
+            {"name": model, "provider": "mistral", "alias": model}
+            | ({} if thinking is None else {"thinking": thinking})
+        ],
         "session_logging": {"enabled": False, "generate_titles": False},
         "experiments": {"enable": False},
     }
@@ -455,6 +490,7 @@ def run_vibe(
     deadline: float | None = None,
     temp_prefix: str = "headless-agents-",
     workspace: Workspace | None = None,
+    reasoning_effort: str = "medium",
 ) -> int:
     """Run one ``vibe -p`` and return its classified code (spec §3.7)."""
     if timeout_seconds <= 0:
@@ -474,11 +510,16 @@ def run_vibe(
             return INVALID_USAGE_EXIT_CODE
     # Spec §3.7: a refusal before start is 2, nothing created, nothing spawned.
     reason, api_key = _refusal(model, profile, ambient)
+    if reason is None:
+        try:
+            thinking = thinking_for(reasoning_effort)
+        except ValueError as exc:
+            reason = str(exc)
     if reason is not None or api_key is None:
         stderr_log.write_text(f"{reason}\n", encoding="utf-8")
         return INVALID_USAGE_EXIT_CODE
     enabled, permissions = tool_lists(workspace)
-    config_text = vibe_config(model=model, permissions=permissions)
+    config_text = vibe_config(model=model, permissions=permissions, thinking=thinking)
 
     def _run(base: Path) -> int:
         home = build_vibe_home(root=base, name=name, config_text=config_text)
@@ -566,8 +607,9 @@ def _preamble_for(spec: RunSpec, workspace: Workspace | None) -> str:
 class VibeProvider:
     """:class:`~headless_agents.protocol.AgentProvider` adapter over Mistral Vibe.
 
-    ``spec.max_turns`` becomes ``--max-turns``; ``spec.reasoning_effort`` is
-    not used (Vibe 2.26.0 has no per-run effort option).
+    ``spec.max_turns`` becomes ``--max-turns``; ``spec.reasoning_effort`` becomes
+    the model's ``thinking`` level in the per-run config (:func:`thinking_for`):
+    Vibe 2.26.0 has no per-run effort option.
     """
 
     name = "vibe"
@@ -604,7 +646,11 @@ class VibeProvider:
         return build_vibe_home(
             root=self._root(environ),
             name=spec.name,
-            config_text=vibe_config(model=spec.model, permissions=permissions),
+            config_text=vibe_config(
+                model=spec.model,
+                permissions=permissions,
+                thinking=thinking_for(spec.reasoning_effort),
+            ),
         )
 
     def tool_call_completed(self, spec: RunSpec) -> bool:
@@ -638,6 +684,7 @@ class VibeProvider:
             ephemeral_root=self._ephemeral_root,
             deadline=spec.deadline,
             workspace=workspace,
+            reasoning_effort=spec.reasoning_effort,
         )
         duration = time.monotonic() - start
         exit_code, git_tampered = settle_run(tripwire, exit_code, spec.stderr_log)

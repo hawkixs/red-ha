@@ -123,6 +123,47 @@ class TestVibeConfig:
         with pytest.raises(ValueError, match="permission"):
             vibe.vibe_config(model="m", permissions={"bash": "ask"})
 
+    def test_writes_the_thinking_level_on_the_model(self) -> None:
+        text = vibe.vibe_config(model="mistral-large-4", permissions={}, thinking="low")
+        assert tomllib.loads(text)["models"] == [
+            {
+                "name": "mistral-large-4",
+                "provider": "mistral",
+                "alias": "mistral-large-4",
+                "thinking": "low",
+            }
+        ]
+
+    def test_refuses_an_unknown_thinking_level(self) -> None:
+        with pytest.raises(ValueError, match="thinking"):
+            vibe.vibe_config(model="m", permissions={}, thinking="ultra")
+
+
+class TestThinkingFor:
+    """Measured 2026-10-13 (Vibe 2.26.0, Large 4): thinking "low" (API reasoning "none")
+    ran the confinement probe 4/4 in 13-18 s; the default ran 0/3 complete, up to 279 s
+    for the first turn."""
+
+    @pytest.mark.parametrize(
+        ("effort", "thinking"),
+        [
+            ("none", "low"),
+            ("minimal", "low"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("xhigh", "max"),
+            ("max", "max"),
+            ("ultra", "max"),
+        ],
+    )
+    def test_maps_every_ha_effort(self, effort: str, thinking: str) -> None:
+        assert vibe.thinking_for(effort) == thinking
+
+    def test_refuses_an_unknown_effort(self) -> None:
+        with pytest.raises(ValueError, match="effort"):
+            vibe.thinking_for("turbo")
+
 
 class TestBuildCommand:
     def test_the_measured_programmatic_command(self, tmp_path: Path) -> None:
@@ -499,6 +540,22 @@ class TestRunVibe:
         assert not [k for k in env if k.startswith("VIBE_") and k != "VIBE_HOME"]
         assert tomllib.loads((record / "config.toml").read_text())["enable_connectors"] is False
 
+    def test_the_effort_becomes_the_model_thinking_level(self, tmp_path: Path) -> None:
+        record = tmp_path / "record"
+        script = _fake_vibe(
+            tmp_path, stdout_file=FIXTURES / "read-ok.events.jsonl", record_dir=record
+        )
+        assert _run(tmp_path, script, reasoning_effort="low") == 0
+        models = tomllib.loads((record / "config.toml").read_text())["models"]
+        assert models[0]["thinking"] == "low"
+
+    def test_an_unknown_effort_is_refused_before_start(self, tmp_path: Path) -> None:
+        record = tmp_path / "record"
+        script = _fake_vibe(tmp_path, record_dir=record)
+        assert _run(tmp_path, script, reasoning_effort="turbo") == 2
+        assert not record.exists()
+        assert "effort" in (tmp_path / "logs" / "stderr.log").read_text()
+
     def test_the_cwd_is_the_ephemeral_home_and_it_is_removed(self, tmp_path: Path) -> None:
         record = tmp_path / "record"
         script = _fake_vibe(
@@ -752,6 +809,27 @@ class TestProvider:
         assert result.tokens is None and result.cost_usd is None and result.model_reported is None
         assert result.text
         assert (tmp_path / "run" / "result.json").is_file()
+
+    def test_run_passes_the_spec_effort_as_the_thinking_level(self, tmp_path: Path) -> None:
+        (tmp_path / "homes").mkdir()
+        record = tmp_path / "record"
+        script = _fake_vibe(
+            tmp_path, stdout_file=FIXTURES / "read-ok.events.jsonl", record_dir=record
+        )
+        provider = vibe.VibeProvider(ephemeral_root=tmp_path / "homes")
+        provider.run(self._spec(tmp_path, script, reasoning_effort="high"))
+        models = tomllib.loads((record / "config.toml").read_text())["models"]
+        assert models[0]["thinking"] == "high"
+
+    def test_prepare_home_writes_the_thinking_level(self, tmp_path: Path) -> None:
+        (tmp_path / "homes").mkdir()
+        provider = vibe.VibeProvider(ephemeral_root=tmp_path / "homes")
+        home = provider.prepare_home(
+            self._spec(tmp_path, Path("/opt/vibe"), reasoning_effort="low")
+        )
+        assert home is not None
+        models = tomllib.loads((home / ".vibe" / "config.toml").read_text())["models"]
+        assert models[0]["thinking"] == "low"
 
     def test_build_command_previews_the_real_command(self, tmp_path: Path) -> None:
         provider = vibe.VibeProvider(ephemeral_root=tmp_path / "homes")

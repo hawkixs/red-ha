@@ -189,6 +189,11 @@ def test_a_rail_that_ignores_effort_says_so(world: World) -> None:
     assert "effort medium (default) (not used by claude)" in world.said[0]
 
 
+def test_vibe_uses_the_effort(world: World) -> None:
+    world.run("vibe", overrides=Overrides(model="mistral-large-4", effort="low"))
+    assert world.said[0].endswith("effort low (--effort), timeout 300 s (default)")
+
+
 def test_each_chain_link_prints_its_own_line(world: World) -> None:
     world.roles('[r]\nchain = ["codex:m1", "claude"]\n')
     world.fakes["codex"] = _Fake("codex", code=3)
