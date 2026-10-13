@@ -31,8 +31,16 @@ from typing import Final
 
 from . import lineage as lineages
 from . import locks, procgroup, proof_state, retire, review_flow, reviews, structured, write_flow
-from .budget import BUDGET_EXHAUSTED, Caps, Ledger, cost_cap, input_tokens_cap
-from .capability import scoped_environment
+from .budget import (
+    BUDGET_EXHAUSTED,
+    BUDGET_REASONS,
+    BUDGET_UNMEASURED,
+    Caps,
+    Ledger,
+    cost_cap,
+    input_tokens_cap,
+)
+from .capability import BUDGET_EXIT_CODE, scoped_environment
 from .chain import run_chain
 from .cli_models import ModelsError, check_known_model, model_sources_for, models_for
 from .config_paths import ConfigPathError, config_file, state_dir
@@ -61,6 +69,7 @@ from .report import (
     RUN_JSON,
     new_report,
     refused_step_entry,
+    skipped_step_entry,
     step_dir_name,
     step_entry,
     summary_line,
@@ -1345,6 +1354,18 @@ class _Phase:
     entries: list[dict[str, object]]
     results: list[RunResult | None]
     failure_reason: str | None
+    stopped: str | None = None
+
+
+def _budget_stop(ledger: Ledger, result: RunResult) -> str | None:
+    """Why no later step may start after this result (spec usage §3.6)."""
+    if result.failure_reason in BUDGET_REASONS:
+        return result.failure_reason
+    if ledger.crossed:
+        return BUDGET_EXHAUSTED
+    if ledger.unmeasured:
+        return BUDGET_UNMEASURED
+    return None
 
 
 def _run_phase(
@@ -1355,6 +1376,7 @@ def _run_phase(
     run_dir: Path,
     worktree: Path,
     say: Callable[[str], None],
+    ledger: Ledger | None = None,
 ) -> _Phase:
     """Run ``(index, slot, prompt)`` steps in parallel, each read-only on the worktree.
 
@@ -1402,26 +1424,52 @@ def _run_phase(
                 index=index,
                 slot=slot.slot,
                 attempts=earlier,
+                ledger=ledger,
             )
         said(f"step {index} {slot.slot} {slot.role.name}: exit {final.exit_code}")
         return final
 
-    pool = ThreadPoolExecutor(max_workers=len(steps))
-    futures = [pool.submit(run_one, step) for step in steps]
-    try:
-        results = [future.result() for future in futures]
-    except BaseException:
-        # A Ctrl-C lands here, in the main thread; the rails wait in the workers and
-        # never see it. Their providers die first, then their threads are joined --
-        # only then may the caller remove the worktree they were reading (§3.9).
-        procgroup.kill_collected(live)
-        pool.shutdown(wait=True, cancel_futures=True)
-        raise
-    pool.shutdown(wait=True)
+    stopped: str | None = None
+    results: list[RunResult | None]
+    if ledger is not None:
+        results = []
+        try:
+            for step in steps:
+                if stopped is not None:
+                    results.append(None)
+                    continue
+                ran = run_one(step)
+                results.append(ran)
+                stopped = _budget_stop(ledger, ran)
+        except BaseException:
+            procgroup.kill_collected(live)
+            raise
+    else:
+        pool = ThreadPoolExecutor(max_workers=len(steps))
+        futures = [pool.submit(run_one, step) for step in steps]
+        try:
+            results = [future.result() for future in futures]
+        except BaseException:
+            procgroup.kill_collected(live)
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        pool.shutdown(wait=True)
     entries = []
     failed = False
     for (index, slot, _), result in zip(steps, results, strict=True):
         name = step_dir_name(index, slot.slot, slot.role.name)
+        if result is None:
+            assert stopped is not None
+            entries.append(
+                skipped_step_entry(
+                    index=index,
+                    slot=slot.slot,
+                    role=slot.role.name,
+                    step_dir=f"steps/{name}",
+                    reason=stopped,
+                )
+            )
+            continue
         entry = step_entry(
             index=index,
             slot=slot.slot,
@@ -1433,13 +1481,15 @@ def _run_phase(
             effort=slot.role.effort,
             timeout_seconds=slot.role.timeout,
             attempts=attempts_of.get(index, []),
+            steps_after_crossing=_crossing(ledger, result),
         )
         entry["verdict"] = read_verdict(result.text)
         entries.append(entry)
         failed = failed or result.exit_code != 0 or not (result.text or "").strip()
-    return _Phase(
-        entries=entries, results=list(results), failure_reason="step_failed" if failed else None
-    )
+    reasons = [r.failure_reason for r in results if r is not None and r.failure_reason]
+    budget_reasons = [reason for reason in reasons if reason in BUDGET_REASONS]
+    failure = budget_reasons[-1] if budget_reasons else ("step_failed" if failed else None)
+    return _Phase(entries=entries, results=results, failure_reason=failure, stopped=stopped)
 
 
 def _execute_review(
@@ -1453,9 +1503,12 @@ def _execute_review(
     started: float,
     say: Callable[[str], None],
     admission_wait: locks.AdmissionWait | None = None,
+    ledger: Ledger | None = None,
 ) -> Outcome:
     """A review run: the vendor rule and the pinned change, the reviewers in parallel,
-    then the judge; the verdict, the result and the cleanup (§3.5, §3.8.4)."""
+    then the judge; the verdict, the result and the cleanup (§3.5, §3.8.4). Under a budget
+    the reviewers take turns, and a budget stop leaves the judge unstarted and the review
+    without a verdict (spec 2026-10-13 usage §3.6)."""
     request, run_dir = plan.request, entry.run_dir
     table = plan.vendor_table
     if table is None:
@@ -1510,10 +1563,11 @@ def _execute_review(
             run_dir=run_dir,
             worktree=prepared.worktree,
             say=say,
+            ledger=ledger,
         )
         entries, failure = list(phase.entries), phase.failure_reason
         deciding: RunResult | None = phase.results[0] if len(phase.results) == 1 else None
-        if failure is None and judge is not None:
+        if failure is None and phase.stopped is None and judge is not None:
             index, slot = judge
             answers = [
                 ReviewText(
@@ -1532,10 +1586,23 @@ def _execute_review(
                 run_dir=run_dir,
                 worktree=prepared.worktree,
                 say=say,
+                ledger=ledger,
             )
             entries.extend(judged.entries)
             failure = judged.failure_reason
             deciding = judged.results[0]
+        elif phase.stopped is not None and judge is not None:
+            index, slot = judge
+            name = step_dir_name(index, slot.slot, slot.role.name)
+            entries.append(
+                skipped_step_entry(
+                    index=index,
+                    slot=slot.slot,
+                    role=slot.role.name,
+                    step_dir=f"steps/{name}",
+                    reason=phase.stopped,
+                )
+            )
         verdict: Verdict | None = None
         text = deciding.text if deciding is not None else None
         if failure is None:
@@ -1566,6 +1633,8 @@ def _execute_review(
         status, code = "approved", 0
     elif verdict == "changes":
         status, code = "changes", review_flow.CHANGES_EXIT_CODE
+    elif failure == BUDGET_EXHAUSTED:
+        status, code = "budget_exhausted", BUDGET_EXIT_CODE
     else:
         status, code = "failed", 1
     for step in entries:
@@ -1576,6 +1645,7 @@ def _execute_review(
         verdict=verdict,
         text=text,
         failure_reason=failure,
+        budget=_budget(ledger),
         cleanup=cleanup,
         duration_seconds=round(time.monotonic() - started, 3),
     )
@@ -1758,6 +1828,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
                     started=started,
                     say=say,
                     admission_wait=admission_wait,
+                    ledger=ledger,
                 ),
                 say,
             )

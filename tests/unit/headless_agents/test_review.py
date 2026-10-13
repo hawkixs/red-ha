@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 
 from headless_agents import engine, lineage, locks, provenance, quarantine, review_flow, reviews
+from headless_agents.budget import BUDGET_EXHAUSTED, BUDGET_UNMEASURED
+from headless_agents.capability import BUDGET_EXIT_CODE
 from headless_agents.engine import Overrides, Request, UsageError, execute, plan
 from headless_agents.model_vendor import LinkRecord
 from headless_agents.proofs import CLI_RAILS, record_proof
@@ -34,6 +36,211 @@ from headless_agents.state import publish
 GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 APPROVE = "Looks right.\nVERDICT: APPROVE"
 CHANGES = "src/app.py:2 high: the flag is never read.\nVERDICT: CHANGES"
+
+# ── a capped review (spec 2026-10-13 usage and budget §3.6) ─────────────────
+
+OC_ROLES = """
+[oc-a]
+provider = "opencode"
+
+[oc-b]
+provider = "opencode"
+
+[oc-judge]
+provider = "opencode"
+"""
+
+OC_WORKFLOWS = """
+[oc-panel]
+shape = "review"
+review = ["oc-a", "oc-b"]
+judge = "oc-judge"
+"""
+
+
+@dataclass
+class _PanelSpender:
+    """opencode under a cap, call after call: each call charges the run's ledger."""
+
+    name: str
+    costs: list[float]
+    unmeasured_call: int | None = None
+    tamper_call: int | None = None
+    specs: list[RunSpec] = field(default_factory=list)
+    active: int = 0
+    most_active: int = 0
+
+    def run(self, spec: RunSpec) -> RunResult:
+        call = len(self.specs)
+        self.specs.append(spec)
+        self.active += 1
+        self.most_active = max(self.most_active, self.active)
+        try:
+            time.sleep(0.2)
+            ledger, cost = spec.budget, self.costs[call]
+            crossed = unmeasured = False
+            if ledger is not None:
+                ledger.measure(cost=cost, input_tokens=None)
+                unmeasured = call == self.unmeasured_call
+                if unmeasured:
+                    ledger.complete = False
+                    ledger.unmeasured = True
+                ledger.settle()
+                crossed = ledger.crossed
+            spec = spec.with_run_dir_defaults()
+            assert spec.events_log is not None and spec.stderr_log is not None
+            spec.events_log.parent.mkdir(parents=True, exist_ok=True)
+            spec.events_log.write_text(f'{{"call": {call}}}\n', encoding="utf-8")
+            spec.stderr_log.write_text(f"call {call}\n", encoding="utf-8")
+            judging = "Judge the reviews below" in spec.prompt
+            answer = "One reviewer is right.\nVERDICT: APPROVE" if judging else APPROVE
+            code, reason = 0, None
+            if call == self.tamper_call:
+                code, crossed = 1, False
+            elif crossed:
+                code, reason = BUDGET_EXIT_CODE, BUDGET_EXHAUSTED
+            elif unmeasured:
+                code, reason = 1, BUDGET_UNMEASURED
+            return record(
+                spec,
+                RunResult(
+                    exit_code=code,
+                    provider=self.name,
+                    model=spec.model,
+                    report_path=spec.report_log,
+                    events_log=spec.events_log,
+                    tokens=TokenUsage(input=100, output=10),
+                    duration_seconds=0.2,
+                    tool_call_completed=False,
+                    text=answer if code == 0 else None,
+                    run_id=run_id_of(spec),
+                    cost_usd=cost,
+                    partial_text=f"partial of call {call}" if crossed else None,
+                    failure_reason=reason,
+                    usage_complete=not unmeasured,
+                ),
+            )
+        finally:
+            self.active -= 1
+
+
+def _oc_panel(world: World, *costs: float, unmeasured_call: int | None = None) -> _PanelSpender:
+    config = world.home / ".config" / "ha"
+    with (config / "roles.toml").open("a") as stream:
+        stream.write(OC_ROLES)
+    with (config / "workflows.toml").open("a") as stream:
+        stream.write(OC_WORKFLOWS)
+    spender = _PanelSpender("opencode", list(costs), unmeasured_call=unmeasured_call)
+    world.agents["opencode"] = spender  # type: ignore[assignment]
+    world.commit_by_hand()
+    return spender
+
+
+def test_a_capped_review_runs_its_members_one_after_another_in_their_seats(world: World) -> None:
+    spender = _oc_panel(world, 0.25, 0.25, 0.25)
+    outcome = world.review("oc-panel", max_cost=1.0)
+    assert outcome.exit_code == 0, world.said
+    assert spender.most_active == 1, "a capped panel ran two members at once"
+    for seat in ("01-review-oc-a", "02-review-oc-b", "03-judge-oc-judge"):
+        step_dir = outcome.run_dir / "steps" / seat
+        assert (step_dir / "events.jsonl").read_text(encoding="utf-8").startswith('{"call"')
+        assert (step_dir / "stderr.log").read_text(encoding="utf-8").startswith("call ")
+    budget = _report(outcome)["budget"]
+    assert isinstance(budget, dict) and budget["spent_cost"] == 0.75
+
+
+def test_an_uncapped_review_still_runs_its_members_concurrently(world: World) -> None:
+    spender = _oc_panel(world, 0.25, 0.25, 0.25)
+    outcome = world.review("oc-panel")
+    assert outcome.exit_code == 0, world.said
+    assert spender.most_active == 2
+    assert _report(outcome)["budget"] is None
+
+
+def test_a_first_member_crossing_the_cap_starts_neither_the_second_nor_the_judge(
+    world: World,
+) -> None:
+    spender = _oc_panel(world, 1.5, 0.25, 0.25)
+    outcome = world.review("oc-panel", max_cost=1.0)
+    assert outcome.exit_code == BUDGET_EXIT_CODE
+    assert len(spender.specs) == 1
+    report = _report(outcome)
+    assert (report["status"], report["verdict"], report["text"]) == ("budget_exhausted", None, None)
+    assert report["failure_reason"] == "budget_exhausted"
+    steps = report["steps"]
+    assert isinstance(steps, list)
+    assert [(s["slot"], s["exit_code"], s["started"], s["failure_reason"]) for s in steps] == [
+        ("review", 7, True, "budget_exhausted"),
+        ("review", None, False, "budget_exhausted"),
+        ("judge", None, False, "budget_exhausted"),
+    ]
+    assert steps[0]["partial_answer"] == "partial of call 0"
+    assert not reviews.result_path(world.state, outcome.run_id).exists()
+    assert world.registry().resolve(outcome.run_id).status == "budget_exhausted"
+    assert report["cleanup"] == {"status": "done"}
+
+
+def test_a_second_member_crossing_the_cap_leaves_the_judge_unstarted(world: World) -> None:
+    spender = _oc_panel(world, 0.75, 0.75, 0.25)
+    outcome = world.review("oc-panel", max_cost=1.0)
+    assert outcome.exit_code == BUDGET_EXIT_CODE
+    assert len(spender.specs) == 2
+    steps = _report(outcome)["steps"]
+    assert isinstance(steps, list)
+    assert [(s["exit_code"], s["verdict"], s["started"]) for s in steps] == [
+        (0, "approve", True),
+        (7, None, True),
+        (None, None, False),
+    ]
+
+
+def test_an_unmeasured_member_fails_the_review_and_stops_it(world: World) -> None:
+    spender = _oc_panel(world, 0.25, 0.25, 0.25, unmeasured_call=0)
+    outcome = world.review("oc-panel", max_cost=1.0)
+    assert outcome.exit_code == 1 and len(spender.specs) == 1
+    report = _report(outcome)
+    assert (report["status"], report["failure_reason"]) == ("failed", "budget_unmeasured")
+    steps = report["steps"]
+    assert isinstance(steps, list)
+    assert [s["failure_reason"] for s in steps] == ["budget_unmeasured"] * 3
+    budget = report["budget"]
+    assert isinstance(budget, dict) and budget["spent_complete"] is False
+
+
+def test_ha_show_prints_the_members_partial_and_no_verdict(world: World) -> None:
+    _oc_panel(world, 1.5, 0.25, 0.25)
+    outcome = world.review("oc-panel", max_cost=1.0)
+    code, out, _ = _cli(world, "show", outcome.run_id)
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0].endswith("exit 7  budget exhausted (budget_exhausted)")
+    assert "--- review oc-a: partial answer (budget exhausted, not an answer) ---" in lines
+    assert "partial of call 0" in lines
+    assert "step    review oc-b: not started, budget_exhausted" in lines
+    assert not any("VERDICT" in line for line in lines)
+
+
+def test_a_member_whose_tripwire_fired_after_crossing_the_cap_starts_nothing_more(
+    world: World,
+) -> None:
+    """The tripwire keeps its exit 1 and reason; the ledger's crossing still stops the panel."""
+    spender = _oc_panel(world, 1.5, 0.25, 0.25)
+    spender.tamper_call = 0
+    outcome = world.review("oc-panel", max_cost=1.0)
+    assert len(spender.specs) == 1, "a member started after the cap was crossed"
+    assert outcome.exit_code == 1
+    report = _report(outcome)
+    assert (report["status"], report["failure_reason"]) == ("failed", "step_failed")
+    steps = report["steps"]
+    assert isinstance(steps, list)
+    assert [(s["exit_code"], s["started"], s["failure_reason"]) for s in steps] == [
+        (1, True, None),
+        (None, False, "budget_exhausted"),
+        (None, False, "budget_exhausted"),
+    ]
+    assert steps[0]["partial_answer"] is None
+    budget = report["budget"]
+    assert isinstance(budget, dict) and budget["spent_cost"] == 1.5
 
 
 def _git(cwd: Path, *args: str) -> str:
