@@ -39,6 +39,7 @@ from .context import ContextBundle, ContextLevel, resolve_context, role_instruct
 from .locks import LockTimeout, Rank, held
 from .mcp_profiles import PROFILES_FILE_NAME, McpProfileError, load_profiles, mcp_server
 from .model_catalog import EFFORT_OPTIONAL_PROVIDERS
+from .model_vendor import VENDORS_FILE_NAME, VendorTable, VendorTableError, load_table, role_links
 from .profile import CapabilityProfile, Credentials, McpServer, Workspace, mcp_no_proxy_hosts
 from .proofs import CLI_RAILS, confinement, isolation_label, isolation_ok
 from .providers.claude import MAX_APPEND_SYSTEM_PROMPT_BYTES
@@ -78,6 +79,7 @@ from .templates import (
     read_verdict,
     review_prompt,
 )
+from .vendor import PanelMember
 from .workflows import Workflow, WorkflowsError, load_workflows
 from .workspace import prepend
 
@@ -179,6 +181,7 @@ class Plan:
     joins: str | None = None
     #: A review's panel -- its reviewers, then its judge -- in launch order.
     panel: tuple[SlotPlan, ...] = ()
+    vendor_table: VendorTable | None = None
     #: The run ``--run`` names, and the owner of its lineage, read from the registry.
     reviews: str | None = None
     reviewed_lineage: str | None = None
@@ -591,6 +594,14 @@ def _slot_plan(slot: str, role: Role, request: Request, config: Config, name: st
     )
 
 
+def panel_members(plan: Plan) -> tuple[PanelMember, ...]:
+    """The whole panel's links from the same model and environment snapshots it executes."""
+    return tuple(
+        PanelMember(slot.slot, slot.role.name, role_links(slot.role, slot.models, slot.environment))
+        for slot in plan.panel
+    )
+
+
 def _plan_review(request: Request, workflow: Workflow, config: Config) -> Plan:
     """A review target: every slot planned; the head, base and diff wait for ``execute``.
 
@@ -606,6 +617,10 @@ def _plan_review(request: Request, workflow: Workflow, config: Config) -> Plan:
         _slot_plan(slot, resolve_role(name, config.roles), request, config, workflow.name)
         for slot, name in workflow.slot_roles()
     )
+    try:
+        table = load_table(config_file(VENDORS_FILE_NAME, request.environ, home=request.home))
+    except (ConfigPathError, VendorTableError) as exc:
+        raise UsageError(str(exc)) from None
     state = state_dir(request.environ, home=request.home)
     lineage = (
         _continued_lineage(request.review_run, state=state, home=request.home, option="--run")
@@ -627,6 +642,7 @@ def _plan_review(request: Request, workflow: Workflow, config: Config) -> Plan:
         workflow=workflow,
         task=task,
         panel=panel,
+        vendor_table=table,
         reviews=request.review_run,
         reviewed_lineage=lineage,
     )
@@ -1339,6 +1355,9 @@ def _execute_review(
     """A review run: the vendor rule and the pinned change, the reviewers in parallel,
     then the judge; the verdict, the result and the cleanup (§3.5, §3.8.4)."""
     request, run_dir = plan.request, entry.run_dir
+    table = plan.vendor_table
+    if table is None:
+        raise UsageError("internal: a review plan without its vendor table; nothing ran")
     reviewers = [(i, s) for i, s in enumerate(plan.panel, 1) if s.slot == "review"]
     judge = next(((i, s) for i, s in enumerate(plan.panel, 1) if s.slot == "judge"), None)
     try:
@@ -1352,7 +1371,8 @@ def _execute_review(
             head_ref=request.head,
             base_ref=request.base,
             reviewed_lineage=plan.reviewed_lineage,
-            reviewers={slot.role.name: slot.role.providers for _, slot in reviewers},
+            panel=panel_members(plan),
+            table=table,
             admission_wait=admission_wait,
         )
     except review_flow.ReviewRefused as exc:
@@ -1879,6 +1899,7 @@ __all__ = [
     "Request",
     "UsageError",
     "operator_environment",
+    "panel_members",
     "plan",
     "prompt_is_optional",
 ]

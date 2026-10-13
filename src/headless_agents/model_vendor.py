@@ -56,6 +56,38 @@ class LinkRecord:
         return cls(provider, model, tuple(switches))
 
 
+@dataclass(frozen=True)
+class ResolvedLink:
+    """A recorded link and the lab resolved by the review's vendor table."""
+
+    provider: str
+    model: str
+    switches: tuple[str, ...]
+    vendor: str
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "switches": list(self.switches),
+            "vendor": self.vendor,
+        }
+
+    @classmethod
+    def from_document(cls, raw: object) -> ResolvedLink | None:
+        if not isinstance(raw, dict) or set(raw) != {"provider", "model", "switches", "vendor"}:
+            return None
+        vendor = raw["vendor"]
+        if not isinstance(vendor, str) or not vendor:
+            return None
+        link = LinkRecord.from_document(
+            {key: raw[key] for key in ("provider", "model", "switches")}
+        )
+        if link is None:
+            return None
+        return cls(link.provider, link.model, link.switches, vendor)
+
+
 def role_links(
     role: Role, models: Mapping[str, str], environment: Mapping[str, str]
 ) -> tuple[LinkRecord, ...]:
@@ -240,6 +272,7 @@ def load_table(operator_file: Path | None) -> VendorTable:
 __all__ = [
     "ENV_SWITCHES",
     "LinkRecord",
+    "ResolvedLink",
     "UNKNOWN",
     "VENDORS_FILE_NAME",
     "VendorTable",

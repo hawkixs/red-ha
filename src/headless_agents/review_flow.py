@@ -36,10 +36,11 @@ from .git_tripwire import GitTampered
 from .gitops import git
 from .lineage import LineageState
 from .locks import LockTimeout, Rank, held
+from .model_vendor import VendorTable
 from .repo import RepoIdentity
 from .state import Missing, Unknown
 from .templates import Verdict
-from .vendor import VendorCheck, VendorRefused, attribute, check_independence
+from .vendor import PanelMember, VendorCheck, VendorRefused, attribute, check_independence
 from .write_flow import (
     PATCH_FILE,
     WriteRefused,
@@ -215,7 +216,8 @@ def prepare(
     head_ref: str | None,
     base_ref: str | None,
     reviewed_lineage: str | None,
-    reviewers: Mapping[str, Sequence[str]],
+    panel: Sequence[PanelMember],
+    table: VendorTable,
     admission_wait: locks.AdmissionWait | None = None,
 ) -> Prepared:
     """Steps 1-6 of §3.8.4, then the patch and the detached worktree; :class:`ReviewRefused`.
@@ -238,7 +240,8 @@ def prepare(
             head_ref=head_ref,
             base_ref=base_ref,
             reviewed_lineage=reviewed_lineage,
-            reviewers=reviewers,
+            panel=panel,
+            table=table,
             admission_wait=admission_wait,
         )
     except OSError as exc:
@@ -256,7 +259,8 @@ def _prepare(
     head_ref: str | None,
     base_ref: str | None,
     reviewed_lineage: str | None,
-    reviewers: Mapping[str, Sequence[str]],
+    panel: Sequence[PanelMember],
+    table: VendorTable,
     admission_wait: locks.AdmissionWait | None = None,
 ) -> Prepared:
     """Steps 1-6 of §3.8.4, then the patch and the detached worktree; :class:`ReviewRefused`."""
@@ -337,7 +341,7 @@ def _prepare(
         if code != 0:
             raise ReviewRefused(f"git log failed: {err.strip()}; nothing ran")
         try:
-            check = check_independence(attribute(state, _range_commits(log)), reviewers)
+            check = check_independence(attribute(state, _range_commits(log)), panel, table)
         except VendorRefused as exc:
             raise ReviewRefused(f"{exc}; nothing ran") from None
         reviews.write_check(state, run_id, check)

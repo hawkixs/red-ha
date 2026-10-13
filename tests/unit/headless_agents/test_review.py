@@ -7,6 +7,7 @@ The providers are fakes -- a writer edits its workspace, a reader answers a text
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -21,6 +22,7 @@ import pytest
 
 from headless_agents import engine, lineage, locks, provenance, quarantine, review_flow, reviews
 from headless_agents.engine import Overrides, Request, UsageError, execute, plan
+from headless_agents.model_vendor import LinkRecord
 from headless_agents.proofs import CLI_RAILS, record_proof
 from headless_agents.registry import Probe
 from headless_agents.result import RunResult
@@ -176,7 +178,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
     config = home / ".config" / "ha"
     config.mkdir(parents=True)
     (config / "models.toml").write_text(
-        'codex = "codex-m"\nclaude = "claude-m"\nopencode = "oc-m"\nagy = "agy-m"\n'
+        'codex = "codex-m"\nclaude = "claude-m"\nopencode = "opencode-go/glm-5"\nagy = "gemini-m"\n'
     )
     (config / "roles.toml").write_text(ROLES)
     (config / "workflows.toml").write_text(WORKFLOWS)
@@ -393,7 +395,7 @@ def test_one_failing_reviewer_stops_the_panel_before_the_judge(world: World) -> 
 
 def test_a_reviewer_sharing_a_vendor_with_the_implementer_is_refused(world: World) -> None:
     built = world.implement()
-    with pytest.raises(UsageError, match=r"reviewer reviewer-codex runs codex.*wrote commit"):
+    with pytest.raises(UsageError, match=r"review reviewer-codex runs codex.*wrote commit"):
         world.review("self-check", review_run=built.run_id)
     assert world.agents["codex"].specs[1:] == []
 
@@ -403,8 +405,10 @@ def test_an_independent_reviewer_reviews_an_implement_run(world: World) -> None:
     outcome = world.review("check", review_run=built.run_id)
     assert outcome.exit_code == 0, world.said
     check = _report(outcome)["vendor_check"]
-    assert check["authors"] == ["codex"]  # type: ignore[index]
-    assert check["reviewers"] == {"reviewer": ["claude"]}  # type: ignore[index]
+    assert check["authors"] == ["openai"]  # type: ignore[index]
+    assert [(m["slot"], [link["vendor"] for link in m["links"]]) for m in check["panel"]] == [
+        ("review", ["anthropic"])
+    ]  # type: ignore[index]
     assert check["commits"][0]["run_id"] == built.run_id  # type: ignore[index]
 
 
@@ -426,10 +430,19 @@ def test_after_an_unconfined_write_a_commit_without_provenance_is_its_writers(
 ) -> None:
     publish(
         world.state / "unconfined-writers.json",
-        {"writers": [{"run_id": "x", "repository": str(world.repo), "providers": ["claude"]}]},
+        {
+            "writers": [
+                {
+                    "run_id": "x",
+                    "repository": str(world.repo),
+                    "providers": ["claude"],
+                    "links": [{"provider": "claude", "model": "", "switches": []}],
+                }
+            ]
+        },
     )
     world.commit_by_hand()
-    with pytest.raises(UsageError, match="reviewer reviewer runs claude"):
+    with pytest.raises(UsageError, match="review reviewer runs claude"):
         world.review()
 
 
@@ -1189,3 +1202,88 @@ def test_a_review_still_refuses_a_corrupt_lineage(tmp_path: Path) -> None:
     path.write_text("{broken")
     with pytest.raises(review_flow.ReviewRefused, match="is unknown"):
         review_flow._admitted(tmp_path, [owner])
+
+
+def test_after_a_legacy_unconfined_write_the_review_is_refused(world: World) -> None:
+    publish(
+        world.state / "unconfined-writers.json",
+        {
+            "writers": [
+                {"run_id": "x", "repository": str(world.repo), "providers": ["claude"]},
+            ]
+        },
+    )
+    world.commit_by_hand()
+    with pytest.raises(UsageError, match="predates model provenance"):
+        world.review()
+    assert all(not agent.specs for agent in world.agents.values())
+
+
+def test_a_vibe_author_and_mistral_judge_refuse_before_any_reviewer(world: World) -> None:
+    sha = world.commit_by_hand()
+    provenance.record(
+        world.state,
+        sha,
+        run_id="20261013T100000-aaaaaaaa",
+        lineage="20261013T100000-aaaaaaaa",
+        made_by="engine",
+        providers=["vibe"],
+        links=(LinkRecord("vibe", "mistral-large-4", ()),),
+    )
+    config = world.home / ".config" / "ha"
+    (config / "roles.toml").write_text(
+        ROLES + '\n[mistral-judge]\nprovider = "mistral"\nmodel = "mistral-small-4"\n'
+    )
+    (config / "workflows.toml").write_text(
+        WORKFLOWS
+        + '\n[cross-lab]\nshape = "review"\nreview = ["reviewer", "reviewer-agy"]\njudge = "mistral-judge"\n'
+    )
+    from headless_agents.cli import main
+
+    request = world.request("cross-lab", None)
+    stderr = io.StringIO()
+    assert (
+        main(
+            ["run", "cross-lab"],
+            environ=request.environ,
+            home=world.home,
+            cwd=world.repo,
+            stderr=stderr,
+        )
+        == 2
+    )
+    assert "judge mistral-judge runs mistral" in stderr.getvalue()
+    assert "mistral wrote commit" in stderr.getvalue()
+    assert all(not agent.specs for agent in world.agents.values())
+
+
+@pytest.mark.parametrize(
+    ("target", "variable"),
+    [("check", "ANTHROPIC_BASE_URL"), ("panel", "OPENAI_BASE_URL")],
+)
+def test_backend_switches_refuse_admission_before_any_member(
+    world: World,
+    target: str,
+    variable: str,
+) -> None:
+    world.commit_by_hand()
+    if variable == "OPENAI_BASE_URL":
+        config = world.home / ".config" / "ha"
+        (config / "roles.toml").write_text(
+            ROLES.replace('[judge]\nprovider = "claude"', '[judge]\nprovider = "codex"')
+        )
+    request = world.request(target, None)
+    environ = {**request.environ, variable: "https://backend.example.test"}
+    assert variable in engine.operator_environment(environ)
+    with pytest.raises(UsageError, match=variable):
+        world.review(target, environ=environ)
+    assert all(not agent.specs for agent in world.agents.values())
+
+
+def test_filtered_bedrock_selector_does_not_refuse_a_claude_reviewer(world: World) -> None:
+    world.commit_by_hand()
+    request = world.request("check", None)
+    outcome = world.review(environ={**request.environ, "CLAUDE_CODE_USE_BEDROCK": "1"})
+    assert outcome.exit_code == 0
+    environment = world.agents["claude"].specs[0].environment
+    assert environment is not None and "CLAUDE_CODE_USE_BEDROCK" not in environment

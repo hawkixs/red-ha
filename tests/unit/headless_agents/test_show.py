@@ -14,7 +14,7 @@ from headless_agents import locks, provenance, reviews, show
 from headless_agents.model_vendor import LinkRecord
 from headless_agents.report import RUN_KEYS
 from headless_agents.runs import Registry
-from headless_agents.vendor import AttributedCommit, VendorCheck
+from headless_agents.vendor import AttributedCommit, LegacyVendorCheck
 
 RUN = "20260925T120000-ab12cd34"
 OTHER = "20260925T130000-cd34ef56"
@@ -674,7 +674,7 @@ def test_format_tools_and_tokens() -> None:
 REVIEW = "20260925T150000-9f8e7d6c"
 PINNED = "c" * 40
 REVIEW_TARGET = {"kind": "workflow", "name": "panel", "shape": "review"}
-CHECK = VendorCheck(
+CHECK = LegacyVendorCheck(
     commits=(
         AttributedCommit(sha=SHA_1, run_id=RUN, made_by="engine", providers=("opencode", "codex")),
         AttributedCommit(sha=SHA_2, run_id=None, made_by="hand", providers=()),
@@ -856,7 +856,7 @@ def test_a_review_renders_as_the_golden_text(home: Home) -> None:
 
 
 def test_the_vendors_line_names_attributed_commits_and_none_authors() -> None:
-    check = VendorCheck(
+    check = LegacyVendorCheck(
         commits=(
             AttributedCommit(sha=SHA_1, run_id=None, made_by="unknown", providers=("claude",)),
         ),
@@ -866,7 +866,7 @@ def test_the_vendors_line_names_attributed_commits_and_none_authors() -> None:
     assert show.vendors_line(check.to_document()) == (
         "vendors authors claude (1 attributed to unconfined writers) — reviewers codex: independent"
     )
-    bare = VendorCheck(commits=(), authors=(), reviewers={"r": ("codex",)})
+    bare = LegacyVendorCheck(commits=(), authors=(), reviewers={"r": ("codex",)})
     assert show.vendors_line(bare.to_document()) == (
         "vendors authors none — reviewers codex: independent"
     )
@@ -905,3 +905,22 @@ def test_a_directory_without_a_report_of_ha_is_not_shown(
         (tmp_path / "run.json").write_text(content)
     with pytest.raises(show.NotShown, match="run.json"):
         show.from_dir(tmp_path)
+
+
+def test_a_new_shape_check_is_loaded_from_review_records(home: Home) -> None:
+    from headless_agents.model_vendor import shipped_table
+    from headless_agents.vendor import PanelMember, check_independence
+
+    check = check_independence(
+        (AttributedCommit("1" * 40, None, "hand", (), ()),),
+        (PanelMember("review", "r", (LinkRecord("claude", "claude-x", ()),)),),
+        shipped_table(),
+    )
+    # The state reader preserves the new document for Task 5's rendering.
+    entry = home.registry().create(
+        REVIEW, run_dir=None, target=REVIEW_TARGET, repository=home.root / "repo", lineage=None
+    )
+    entry.run_dir.mkdir(parents=True)
+    reviews.write_check(home.state, REVIEW, check)
+    reviews.write_result(home.state, REVIEW, head=PINNED, verdict="approve", text="ok", check=check)
+    assert home.rebuild(REVIEW).report["vendor_check"] == check.to_document()
