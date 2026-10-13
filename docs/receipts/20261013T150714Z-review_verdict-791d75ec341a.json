@@ -1,0 +1,50 @@
+{
+  "digest": "sha256:791d75ec341a4ffea66089999e20376b59ece5526d932de04eabb55931e75a80",
+  "idempotency_key": "review_verdict:e126f8437a5383491b58126253e064a20e6d11fe:115370708909",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": false,
+      "carry_forwards": {
+        "addressed": [],
+        "deferred": [
+          "CF-4-3"
+        ]
+      },
+      "check_run_id": 115370708909,
+      "diff_truncated": false,
+      "finding_count": 1,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "If codex exposes a boolean short flag, clap reads a group like '-vp work' as --verbose plus '-p work', but _flag returns (\"-v\", \"p\") so the guard would miss the profile switch; this is a pre-existing gap outside amendment A1's enumerated attached forms (--flag=value, -f=value, -fvalue) and only matt",
+          "file": "src/headless_agents/model_vendor.py",
+          "id": "F-13-1",
+          "line": 126,
+          "severity": "minor",
+          "status": "new",
+          "title": "Combined short-option groups can still hide a trailing -p/-c"
+        }
+      ],
+      "independent": true,
+      "mode": "light",
+      "not_reviewed": [],
+      "pr": 13,
+      "providers": [
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "e126f8437a5383491b58126253e064a20e6d11fe",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T15:07:14.271538Z",
+  "schema_version": 1
+}
