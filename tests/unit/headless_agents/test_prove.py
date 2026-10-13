@@ -568,6 +568,28 @@ def test_agy_prompt_uses_its_own_write_tools(tmp_path: Path, versions: list[str]
     assert all("Use the write or edit tool" not in prompt for prompt in prompts)
 
 
+def test_vibe_prompt_names_write_file_for_both_files_and_no_shell(
+    tmp_path: Path, versions: list[str]
+) -> None:
+    """Measured 2026-10-13 (Large 4): a prompt offering a shell command made vibe try bash
+    for the control file, which a write profile without shell denies: no control written."""
+    prompts: list[str] = []
+
+    def record_prompt(rail: str, spec: RunSpec, keep: bool) -> RunResult:
+        prompts.append(spec.prompt)
+        line, control, _ = _prompt_paths(spec)
+        with control.open("a") as stream:
+            stream.write(line + "\n")
+        return _result(spec)
+
+    _prove(tmp_path, "vibe", "confinement", record_prompt)
+    assert prompts
+    for prompt in prompts:
+        assert "printf" not in prompt and "shell:" not in prompt
+        assert "write_file tool for each file" in prompt
+        assert "You have no shell" in prompt
+
+
 def test_opencode_incomplete_run_still_names_unattempted_targets(
     tmp_path: Path, versions: list[str]
 ) -> None:
