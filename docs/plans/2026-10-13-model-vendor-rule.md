@@ -67,7 +67,7 @@ first — every task argues from them).
 | `src/headless_agents/write_flow.py` (modify) | record links from the plan snapshot, in provenance and in unconfined writers |
 | `src/headless_agents/vendor.py` (modify) | attribution with links, vendor resolution, new `VendorCheck`, `LegacyVendorCheck`, `check_from_document` |
 | `src/headless_agents/reviews.py` (modify) | read checks through `check_from_document` |
-| `src/headless_agents/review_flow.py`, `engine.py` (modify) | panel with judge from the slot snapshot; table loaded at planning |
+| `src/headless_agents/review_flow.py`, `engine.py` (modify) | panel with judge from the slot snapshot; table loaded at planning (Task 4) |
 | `src/headless_agents/show.py` (modify) | `vendors_line` for both shapes |
 | `README.md`, `CHANGELOG.md` (modify) | the rule as it now is |
 
@@ -429,7 +429,10 @@ shows the table inside the wheel (hatch ships every file under the package).
   - `ENV_SWITCHES: Final[Mapping[str, frozenset[str]]]` = `{"codex": {"OPENAI_BASE_URL", "OPENAI_API_BASE"}, "claude": {"ANTHROPIC_BASE_URL"}}`
   - `backend_switches(provider: str, environment: Mapping[str, str]) -> tuple[str, ...]` (sorted names present; presence decides, not value)
   - `codex_argv_switches(argv: Sequence[str]) -> tuple[str, ...]`
-  - `build_codex_command(...)` raises `ValueError("codex argv carries a backend switch: ...")` if its own result carries one.
+  - `refuse_argv_switches(argv: Sequence[str]) -> None` in `providers/codex.py`: raises
+    `ValueError("codex argv carries a backend switch: ...")` when `codex_argv_switches`
+    names any; `build_codex_command` calls it on the argv it is about to return (spec
+    amendment A1: an argv switch is refused where it is built, never recorded).
 
 - [ ] **Step 1: Write the failing tests** (append to `test_model_vendor.py`):
 
@@ -465,11 +468,49 @@ def test_codex_argv_switches(argv: list[str], named: tuple[str, ...]) -> None:
     assert codex_argv_switches(argv) == named
 ```
 
-And in `test_provider_codex.py`, a test that every production combination of
-`build_codex_command` carries no switch (reuse that file's existing fixtures for
-`workspace_mode`; iterate over the read-only, write and write-with-shell workspaces and
-`mcp=None`/a server), and one that monkeypatches the module's override tuple to inject
-`("model_provider", "oss")` and expects `ValueError(match="backend switch")`.
+And in `test_provider_codex.py`:
+
+```python
+from headless_agents.providers.codex import refuse_argv_switches
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["codex", "exec", "-c", 'model_provider="oss"', "-"],
+        ["codex", "exec", "--oss", "-"],
+        ["codex", "exec", "-p", "work", "-"],
+    ],
+)
+def test_an_argv_with_a_backend_switch_is_refused(argv: list[str]) -> None:
+    with pytest.raises(ValueError, match="backend switch"):
+        refuse_argv_switches(argv)
+
+
+def test_a_clean_argv_passes() -> None:
+    refuse_argv_switches(["codex", "exec", "-c", "features.web_search=false", "-"])
+```
+
+plus one test that `build_codex_command` output carries no switch for every production
+combination: iterate over the workspace modes this file's existing tests already build
+(read-only, write, write with shell) and `mcp=None` or the file's existing MCP server
+fixture, asserting `codex_argv_switches(command) == ()`; and one test that
+`build_codex_command` calls the guard (monkeypatch `headless_agents.providers.codex.
+refuse_argv_switches` with a recorder and assert it received the returned argv).
+
+And in `test_model_vendor.py`, the clean production environment of `claude` and `codex`:
+
+```python
+from headless_agents.engine import operator_environment
+
+
+def test_a_clean_operator_environment_has_no_switch() -> None:
+    environment = operator_environment(
+        {"PATH": "/bin", "HOME": "/h", "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_VERTEX": "1"}
+    )
+    assert backend_switches("claude", environment) == ()
+    assert backend_switches("codex", environment) == ()
+```
 
 - [ ] **Step 2: Run to see them fail**
 
@@ -507,15 +548,18 @@ def codex_argv_switches(argv: Sequence[str]) -> tuple[str, ...]:
     return tuple(sorted(found))
 ```
 
-Add both names to `__all__`. In `build_codex_command`, just before `return command`:
+Add both names to `__all__`. In `providers/codex.py` (import `codex_argv_switches` from
+`..model_vendor`):
 
 ```python
-    switches = codex_argv_switches(command)
+def refuse_argv_switches(argv: Sequence[str]) -> None:
+    """Refuse an argv that could point codex at another backend (spec amendment A1)."""
+    switches = codex_argv_switches(argv)
     if switches:
         raise ValueError(f"codex argv carries a backend switch: {', '.join(switches)}")
 ```
 
-(import `codex_argv_switches` from `..model_vendor`).
+and in `build_codex_command`, just before `return command`: `refuse_argv_switches(command)`.
 
 - [ ] **Step 4: Run the tests and `make ci`** → green.
 
@@ -648,7 +692,16 @@ def role_links(
 pass `links=role_links(<plan>.role, <plan>.models, <plan>.environment)` where `<plan>` is
 `write.plan` (line ~874) and `plan` (line ~1080); `_publish_unconfined_intent` adds
 `"links": [l.to_document() for l in role_links(write.plan.role, write.plan.models, write.plan.environment)]`.
-Update the `_record` and `_writers` helpers of `test_vendor.py` to pass/emit links.
+Migrate, in this same commit, every existing caller the required `links` argument breaks:
+- `tests/unit/headless_agents/test_vendor.py`: the `_record` helper passes
+  `links=tuple(LinkRecord(p, "", ()) for p in providers)`; `_writers` emits
+  `"links": [{"provider": p, "model": "", "switches": []} for p in providers]` per writer.
+- `tests/unit/headless_agents/test_lineage.py:162`, `:173`, `:181`: pass
+  `links=(LinkRecord("codex", "", ()),)` (or one per provider of the call) and add the
+  `"links"` key to the expected dictionary at `:164`.
+- `tests/unit/headless_agents/test_show.py:116` and `:119`: pass `links=()` for the call
+  with `providers=[]` and `links=(LinkRecord("codex", "", ()),)` for the other.
+Run `grep -rn "provenance.record(" src tests` before committing: no call without `links`.
 
 - [ ] **Step 4: Run the tests and `make ci`** → green.
 
@@ -656,25 +709,35 @@ Update the `_record` and `_writers` helpers of `test_vendor.py` to pass/emit lin
 
 ---
 
-### Task 4: The rule by vendor, the new `VendorCheck` and legacy documents
+### Task 4: The rule by vendor, its documents, and the panel wired to it
+
+One commit: the new `check_independence` signature and its only caller
+(`review_flow._prepare`, fed by the engine) change together, so `make ci` stays green.
 
 **Files:**
 - Modify: `src/headless_agents/model_vendor.py` (add `ResolvedLink`)
 - Modify: `src/headless_agents/vendor.py` (whole module)
-- Modify: `src/headless_agents/reviews.py` (`load_check`, `load_result`)
-- Test: `tests/unit/headless_agents/test_vendor.py`, `tests/unit/headless_agents/test_reviews.py`
+- Modify: `src/headless_agents/reviews.py` (`ReviewResult.check`, `load_check`, `load_result`, `write_check`)
+- Modify: `src/headless_agents/review_flow.py` (`prepare`/`_prepare`: `reviewers` → `panel`, add `table`)
+- Modify: `src/headless_agents/engine.py` (`Plan.vendor_table`, review planning, `panel_members`, the review run ~line 1340)
+- Test: `tests/unit/headless_agents/test_vendor.py`, `test_reviews.py`, `test_review.py`, `test_engine_plan.py`, `test_show.py` (fixture migration only)
 
 **Interfaces:**
 - Consumes: `VendorTable`, `UNKNOWN`, `LinkRecord` (Tasks 1, 3).
 - Produces:
   - `model_vendor.ResolvedLink(provider: str, model: str, switches: tuple[str, ...], vendor: str)` with `to_document()` / `from_document(raw) -> ResolvedLink | None` (vendor a non-empty string).
-  - `vendor.AttributedCommit(sha, run_id, made_by, providers, links: tuple[LinkRecord, ...] | None)` — `None` only for legacy (no `links` recorded); `()` for a hand-written commit.
+  - `vendor.AttributedCommit(sha, run_id, made_by, providers, links: tuple[LinkRecord, ...] | None = None)` — `None` for legacy (no `links` recorded) and in legacy documents, whose decoder keeps constructing it without `links`; `()` for a hand-written commit.
   - `vendor.PanelMember(slot: str, role: str, links: tuple[LinkRecord, ...])`, `slot` in `{"review", "judge"}`.
   - `vendor.check_independence(commits: Sequence[AttributedCommit], panel: Sequence[PanelMember], table: VendorTable) -> VendorCheck`.
   - `vendor.VendorCheck(commits: tuple[CheckedCommit, ...], panel: tuple[CheckedMember, ...], authors: tuple[str, ...], table_digest: str)`; `to_document()` emits `"rule": "model-vendor"`.
   - `vendor.CheckedCommit(sha, run_id, made_by, providers, links: tuple[ResolvedLink, ...])`, `vendor.CheckedMember(slot, role, links: tuple[ResolvedLink, ...])`.
   - `vendor.LegacyVendorCheck` — today's `VendorCheck`, renamed, unchanged behaviour.
   - `vendor.check_from_document(document: Mapping[str, object], *, where: str) -> VendorCheck | LegacyVendorCheck`.
+  - `vendor.AnyVendorCheck = VendorCheck | LegacyVendorCheck` (type alias).
+  - `reviews.ReviewResult.check: AnyVendorCheck`; `reviews.load_check(...) -> AnyVendorCheck | None` (still `None` when no check was written); `reviews.write_check(state, run_id, check: VendorCheck)`.
+  - `engine.Plan.vendor_table: VendorTable | None = None` — set on every review plan, `None` otherwise (pinned by a test).
+  - `engine.panel_members(plan: Plan) -> tuple[PanelMember, ...]` — `PanelMember(slot.slot, slot.role.name, role_links(slot.role, slot.models, slot.environment))` for every slot of `plan.panel`, reviewers then judge.
+  - `review_flow.prepare(..., panel: Sequence[PanelMember], table: VendorTable, ...)` replaces `reviewers=`.
 
 - [ ] **Step 1: Write the failing tests** (rewrite `test_vendor.py` around links; keep
   every existing refusal test for malformed records and unreadable writers):
@@ -816,9 +879,58 @@ a panel vendor in `authors`; `panel` empty; a panel member with `links: []`; a c
 `providers`. Plus: a legacy document (today's shape, copied from an existing fixture in
 `test_reviews.py`) reads as `LegacyVendorCheck` and round-trips.
 
-In `test_reviews.py`: the same `authors`-mismatch document and the empty-panel document
-written as a review result are refused by `reviews.load_result` (`Unknown`), and a legacy
-result still loads.
+Two unconfined writers on one provider with two models attribute one commit carrying
+both links, and its check round-trips:
+
+```python
+def test_two_unconfined_writers_on_one_provider_keep_both_models(tmp_path) -> None:
+    publish(tmp_path / "unconfined-writers.json", {"writers": [
+        {"run_id": OTHER, "repository": "/r", "providers": ["opencode"],
+         "links": [{"provider": "opencode", "model": "opencode-go/glm-5", "switches": []}]},
+        {"run_id": RUN, "repository": "/r", "providers": ["opencode"],
+         "links": [{"provider": "opencode", "model": "opencode-go/deepseek-v4-pro", "switches": []}]},
+    ]})
+    (commit,) = attribute(tmp_path, [(SHA_1, "feat: x")])
+    assert commit.providers == ("opencode", "opencode")
+    check = check_independence((commit,), _panel(("review", "r", _link("agy", "gemini-x"))), TABLE)
+    assert check.authors == ("deepseek", "zhipu")
+    assert check_from_document(check.to_document(), where="t") == check
+```
+
+In `test_reviews.py`, every invalid new-shape case goes through **both** readers:
+
+```python
+@pytest.mark.parametrize("mutate", INVALID_MUTATIONS, ids=INVALID_IDS)
+def test_an_invalid_new_shape_check_is_refused_by_both_readers(tmp_path, mutate) -> None:
+    document = VALID_CHECK.to_document()
+    mutate(document)
+    with pytest.raises(Unknown):
+        check_from_document(document, where="t")
+    _write_result(tmp_path, document)  # the file's existing helper that writes result.json
+    with pytest.raises(Unknown):
+        reviews.load_result(tmp_path, RUN)
+```
+
+where `INVALID_MUTATIONS` holds the nine mutations listed above (authors mismatch, link
+without vendor, unknown author vendor, unknown panel vendor, panel vendor in authors,
+empty panel, panel member without links, non-hand commit without links, links not
+matching providers), and a legacy result (the file's existing `CHECK`, now a
+`LegacyVendorCheck`) still loads through `load_result` and `load_check`.
+
+Engine and admission tests:
+- `test_engine_plan.py`: a planned review has `plan.vendor_table is not None`, a role run
+  has `None`; `panel_members(plan)` returns the reviewers then the judge, each link
+  carrying its `SlotPlan.models` value — for a model set on a chain link, on the role,
+  and from `models.toml`'s default — and rewriting `models.toml` after planning leaves
+  `panel_members(plan)` unchanged; an operator `vendors.toml` that is not TOML makes
+  planning raise `UsageError` naming the file.
+- `test_review.py`: (a) an author commit recorded on `vibe` and a judge on `mistral`
+  refuse the review with exit 2 and no reviewer started (assert on the world's fake
+  agents' recorded `specs`, as the existing tests do); (b) `environ` carrying
+  `ANTHROPIC_BASE_URL` with a `claude` reviewer refuses at admission (the variable passes
+  `operator_environment`), and the same with `OPENAI_BASE_URL` and a `codex` judge;
+  (c) `CLAUDE_CODE_USE_BEDROCK=1` with a `claude` reviewer does not refuse; (d) the
+  existing refusal of `--model` on a review workflow keeps passing unchanged.
 
 - [ ] **Step 2: Run to see them fail** — `uv run pytest tests/unit/headless_agents/test_vendor.py tests/unit/headless_agents/test_reviews.py -q` → FAIL.
 
@@ -837,9 +949,14 @@ In `vendor.py`:
    `[l.provider for l in links] == providers`, non-empty; otherwise `VendorRefused(f"the
    provenance record of {sha[:12]} is malformed: ...")`.
 4. `_unconfined_providers` becomes `_unconfined_writers(state) -> tuple[tuple[str, ...],
-   tuple[LinkRecord, ...] | None]`: providers as today; links = de-duplicated union of
-   every writer's links in order, or `None` as soon as one writer has no `links`; a present
-   but malformed `links` raises `VendorRefused(... malformed ...)`.
+   tuple[LinkRecord, ...] | None]`. When every writer has `links`: links = the
+   de-duplicated union (by the whole record) of every writer's links in order, and
+   providers = `tuple(link.provider for link in links)` — so providers and links always
+   correspond one to one, a provider repeating when it ran two models. As soon as one
+   writer has no `links`: providers = today's de-duplicated union and links = `None`
+   (legacy, authors unknown). A present but malformed `links` raises
+   `VendorRefused(... malformed ...)`; a writer's links whose providers differ from its
+   `providers` are malformed too.
 5. `attribute`: recorded → `_recorded`; hand (`made_by="hand"`) → `links=()`;
    unconfined → `links` from step 4.
 6. `check_independence(commits, panel, table)`:
@@ -852,9 +969,12 @@ def _resolve(link: LinkRecord, table: VendorTable) -> ResolvedLink:
 
 def _why_unknown(link: ResolvedLink) -> str:
     if link.switches:
-        return f"its environment sets {', '.join(link.switches)}, which can point it at another backend"
+        return (
+            f"its vendor is unknown: its environment sets {', '.join(link.switches)}, "
+            "which can point it at another backend"
+        )
     return (
-        f"its vendor cannot be named; declare it in vendors.toml: "
+        f"its vendor is unknown; declare it in vendors.toml: "
         f'[[pair]] provider = "{link.provider}" model = "{link.model}" vendor = "<lab>"'
     )
 
@@ -911,80 +1031,125 @@ def check_independence(
 9. `check_from_document(document, *, where)`: `"rule" in document` →
    `VendorCheck.from_document` (and `rule` must equal `"model-vendor"`), else
    `LegacyVendorCheck.from_document`.
-10. `reviews.load_check` / `load_result` call `check_from_document`; their return type
-    becomes `VendorCheck | LegacyVendorCheck`; `write_check(state, run_id, check: VendorCheck)`.
+10. `reviews`: `ReviewResult.check: AnyVendorCheck`; `load_check` and `load_result` call
+    `check_from_document`; `load_check` keeps returning `None` when no check was written;
+    `write_check(state, run_id, check: VendorCheck)`.
+11. `engine.py`: add `vendor_table: VendorTable | None = None` to `Plan`; where a review
+    plan's `panel` is built, load
+    `load_table(config_file(VENDORS_FILE_NAME, request.environ, home=request.home))`,
+    turning `VendorTableError` into `UsageError(str(exc))`, and set it on the plan; add
+    `panel_members`. In the review run, narrow once:
+
+    ```python
+    table = plan.vendor_table
+    if table is None:  # every review plan loads its table (test_engine_plan pins it)
+        raise UsageError("internal: a review plan without its vendor table; nothing ran")
+    ```
+
+    and call `review_flow.prepare(..., panel=panel_members(plan), table=table, ...)`.
+12. `review_flow._prepare`: `check = check_independence(attribute(state, _range_commits(log)), panel, table)`;
+    `prepare`/`_prepare` take `panel: Sequence[PanelMember]` and `table: VendorTable`
+    instead of `reviewers`. The `fake_prepare` in `test_review.py:664` accepts the new
+    keyword arguments.
+13. Fixture migrations in this commit:
+    - `test_review.py:179`: the world's `models.toml` becomes
+      `codex = "codex-m"\nclaude = "claude-m"\nopencode = "opencode-go/glm-5"\nagy = "gemini-m"\n`
+      (`codex-m` and `claude-m` resolve through their fixed vendors; `oc-m` and `agy-m`
+      would be unknown); `:406-407` assert the new shape:
+      `check["authors"] == ["openai"]` and
+      `[(m["slot"], [l["vendor"] for l in m["links"]]) for m in check["panel"]] == [("review", ["anthropic"]), ...]`
+      with the judge's entry as the panel declares it.
+    - `test_show.py:16, :670, :852, :862` and `test_reviews.py:13, :17`: import and build
+      `LegacyVendorCheck` instead of `VendorCheck` (those fixtures are legacy documents
+      and keep testing the legacy path); add new-shape cases beside them.
 
 Export the new names in `__all__`.
 
 - [ ] **Step 4: Run the tests and `make ci`** → green (mypy included).
 
-- [ ] **Step 5: Commit** — `✨ feat(vendor): judge independence by the model's lab`
+- [ ] **Step 5: Commit** — `✨ feat(vendor): judge independence by the model's lab, judge included`
 
 ---
 
-### Task 5: Wire the panel, the table and `ha show`
+### Task 5: `ha show` and the documentation
 
 **Files:**
-- Modify: `src/headless_agents/review_flow.py` (`prepare`/`_prepare`: replace `reviewers: Mapping[str, Sequence[str]]` with `panel: Sequence[PanelMember]` and add `table: VendorTable`)
-- Modify: `src/headless_agents/engine.py` (review run ~line 1340; planning where `plan.panel` is built — load the table there)
 - Modify: `src/headless_agents/show.py` (`vendors_line`, line ~458)
 - Modify: `README.md` (vendor-rule paragraph ~line 676), `CHANGELOG.md` (`## Unreleased`)
-- Test: `tests/unit/headless_agents/test_review.py`, `tests/unit/headless_agents/test_engine_execute.py`, `tests/unit/headless_agents/test_engine_plan.py`, the `show` tests (search `vendors_line`)
+- Test: `tests/unit/headless_agents/test_show.py`
 
 **Interfaces:**
-- Consumes: `PanelMember`, `check_independence`, `load_table`, `VENDORS_FILE_NAME`, `role_links`.
-- Produces: `engine.panel_members(plan: Plan) -> tuple[PanelMember, ...]` —
-  `PanelMember(slot.slot, slot.role.name, role_links(slot.role, slot.models, slot.environment))`
-  for every slot of `plan.panel`, judge included, in launch order.
+- Consumes: the `model-vendor` document shape of Task 4.
+- Produces: nothing new for code; `vendors_line(check: Mapping[str, object]) -> str` keeps
+  its signature.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test** (in `test_show.py`, beside the existing
+  `vendors_line` tests, which stay unchanged for legacy documents):
 
-- `test_engine_plan.py`: `panel_members` of a planned review returns the reviewers then
-  the judge, each link carrying the model of its `SlotPlan.models` — for a model from a
-  chain link, from the role's `model`, and from `models.toml`'s default; and rewriting
-  `models.toml` after planning leaves `panel_members(plan)` unchanged.
-- `test_engine_execute.py` (or `test_review.py`, following where review execution is
-  tested today): (a) an author commit recorded on `vibe` and a judge on `mistral` refuse
-  the review with exit 2 and **no reviewer step started** (assert no step directory /
-  no fake-provider invocation, whichever the existing tests use); (b) `environ` carrying
-  `ANTHROPIC_BASE_URL` with a `claude` reviewer refuses at admission, the variable
-  passing through `operator_environment`; (c) `environ` carrying
-  `CLAUDE_CODE_USE_BEDROCK=1` with a `claude` reviewer does **not** refuse (it is
-  filtered); (d) an operator `vendors.toml` that is not TOML refuses with exit 2 naming
-  the file; (e) the existing test that a review workflow refuses `--model` still passes
-  unchanged.
-- `show` tests: `vendors_line` renders a new-shape check as
-  `vendors authors deepseek (1 recorded commit) — panel review opencode anthropic, judge agy google: independent`
-  and still renders a legacy check exactly as today.
+```python
+def test_vendors_line_renders_a_model_vendor_check() -> None:
+    check = {
+        "rule": "model-vendor",
+        "table_digest": "sha256:" + "0" * 64,
+        "authors": ["deepseek"],
+        "commits": [{
+            "sha": SHA_1, "run_id": RUN, "made_by": "engine", "providers": ["opencode"],
+            "links": [{"provider": "opencode", "model": "opencode-go/deepseek-v4-pro",
+                       "switches": [], "vendor": "deepseek"}],
+        }],
+        "panel": [
+            {"slot": "review", "role": "r", "links": [
+                {"provider": "opencode", "model": "anthropic/claude-x", "switches": [], "vendor": "anthropic"}]},
+            {"slot": "judge", "role": "j", "links": [
+                {"provider": "agy", "model": "gemini-x", "switches": [], "vendor": "google"}]},
+        ],
+    }
+    assert vendors_line(check) == (
+        "vendors authors deepseek (1 recorded commit) — "
+        "panel review opencode anthropic, judge agy google: independent"
+    )
+```
 
-- [ ] **Step 2: Run to see them fail** — the four test files above → FAIL.
+- [ ] **Step 2: Run to see it fail** — `uv run pytest tests/unit/headless_agents/test_show.py -q` → FAIL on the new test only.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 3: Implement** — at the top of `vendors_line`:
 
-- `engine.py`: add `panel_members`; where the review plan is built, load
-  `table = load_table(config_file(VENDORS_FILE_NAME, request.environ, home=request.home))`
-  and turn `VendorTableError` into `UsageError(str(exc))` (exit 2, before anything runs).
-  Keep the table on the plan (`Plan.vendor_table: VendorTable | None = None`). The review
-  run passes `panel=panel_members(plan), table=plan.vendor_table` to
-  `review_flow.prepare` instead of `reviewers=...`.
-- `review_flow._prepare`: `check = check_independence(attribute(state, _range_commits(log)), panel, table)`.
-- `show.vendors_line`: when `check.get("rule") == "model-vendor"`, render authors (lab
-  names) and the panel members `"<slot> <provider> <vendor>"` joined by `, `; otherwise
-  today's code path unchanged.
-- `README.md`: replace "no reviewer shares a provider with whoever wrote a commit of the
-  range" by "no reviewer or judge runs a model from the lab that wrote a commit of the
-  range (vendors resolved from the model, not the provider; see
-  `docs/specs/2026-10-13-model-vendor-rule-design.md`)", and add one paragraph on
-  `vendors.toml` exact pairs with an example.
-- `CHANGELOG.md` `## Unreleased`: a `### Changed` entry (**breaking** for reviews: the
-  vendor rule compares model labs and covers the judge; reviews of ranges holding commits
-  recorded before this change are refused until those commits leave the range;
-  `VendorCheck` documents gain the `model-vendor` shape, legacy documents still read) and
-  an `### Added` entry for `vendors.toml`.
+```python
+    if check.get("rule") == "model-vendor":
+        return _model_vendor_line(check)
+```
+
+with `_model_vendor_line` reusing today's commit counting (`recorded`, `hand`,
+`attributed` parts) and rendering the panel as
+`", ".join(f"{m['slot']} {l['provider']} {l['vendor']}" for m in panel for l in m['links'])`,
+reading every field defensively as `vendors_line` does today (a malformed entry is
+skipped, never raised: `show` renders what it can).
+
+`README.md`: replace "no reviewer shares a provider with whoever wrote a commit of the
+range" by "no reviewer or judge runs a model from the lab that wrote a commit of the
+range (vendors are resolved from the model, not the provider; see
+`docs/specs/2026-10-13-model-vendor-rule-design.md`)", and add one paragraph on
+`vendors.toml`:
+
+```toml
+# vendors.toml, beside models.toml: exact pairs for models the shipped table cannot name
+[[pair]]
+provider = "openai-compat"
+model = "my-model"
+vendor = "acme"
+```
+
+`CHANGELOG.md` `## Unreleased`: a `### Changed` entry, marked **breaking** for reviews:
+the vendor rule compares the labs of the models (reviewers and judge) instead of
+provider names; a model the table cannot name, or a `claude`/`codex` link whose
+environment sets a backend URL, is refused; reviews of ranges holding commits recorded
+before this change are refused until those commits leave the range; `vendor_check`
+documents gain the `model-vendor` shape and legacy documents still read. An
+`### Added` entry for `vendors.toml`.
 
 - [ ] **Step 4: Run the full suite** — `make ci` → green; `rail check` → green.
 
-- [ ] **Step 5: Commit** — `✨ feat(review): check the whole panel by model lab before it starts`
+- [ ] **Step 5: Commit** — `📝 docs(vendor): render and document the model-vendor rule`
 
 ---
 

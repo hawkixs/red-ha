@@ -1,0 +1,57 @@
+{
+  "digest": "sha256:e0c9973786ab730cd1b9448cd9fe3e883938963e08291f7ab8bff5904a7911a2",
+  "idempotency_key": "review_verdict:eb5f98f551fcb81ff64907e0b5197ad3b1c3400a:115308684013",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": false,
+      "carry_forwards": {
+        "addressed": [],
+        "deferred": [
+          "CF-4-3"
+        ]
+      },
+      "check_run_id": 115308684013,
+      "diff_truncated": false,
+      "finding_count": 2,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "Both receipts record round=no_verdict with verdict=request_changes, blocking=false, and finding_count=0. Whether this combination is the schema's intended encoding for a no-verdict pass (rather than an inconsistency) depends on the rail's receipt schema, which is outside the diff; worth confirming d",
+          "file": "docs/receipts/20261013T095457Z-review_verdict-eed892ab6a9a.json",
+          "id": "F-10-1",
+          "line": 21,
+          "severity": "minor",
+          "status": "still_open",
+          "title": "Receipt encodes verdict=request_changes with blocking=false and zero findings"
+        },
+        {
+          "class": "blocker",
+          "evidence": "CF-4-3 is an open carry-forward: list it under `## Carry-forwards` as one line, CF-<pr>-<n>: addressed | CF-<pr>-<n>: deferred: <reason>",
+          "file": "(pull request description)",
+          "id": "F-10-2",
+          "line": null,
+          "severity": "blocking",
+          "status": "fixed",
+          "title": "CF-4-3 not accounted for"
+        }
+      ],
+      "independent": true,
+      "mode": "light",
+      "pr": 10,
+      "providers": [
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 2,
+      "sha": "eb5f98f551fcb81ff64907e0b5197ad3b1c3400a",
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T12:57:36.144583Z",
+  "schema_version": 1
+}

@@ -1,6 +1,7 @@
 # Vendor rule by model vendor — design
 
-Date: 2026-10-13. Status: approved (design review by codex, rounds 1-3 and closure verification). Follows the vibe rail (PR #9). Amends the
+Date: 2026-10-13. Status: approved (design review by codex, rounds 1-3 and closure verification), with
+amendment A1 from the plan review. Follows the vibe rail (PR #9). Amends the
 vendor rule of spec 0.5.0 §3.8.4 (`src/headless_agents/vendor.py`).
 
 ## 1. Problem
@@ -256,3 +257,18 @@ TDD, unit only (no provider is called):
   `vendors.toml` line to add.
 - Reviews with genuinely independent labs pass; old review documents still read;
   `make ci` and `rail check` green.
+
+## Amendments
+
+### A1 — argv switches are refused where the argv is built (plan review, round 1)
+
+D2bis named one detector over "the argv the rail will run" and the environment. The argv
+of a ha run is built by ha's own code from fixed parameters (`build_codex_command`); no
+operator state reaches it. So an argv switch is not a property of a link to record, it
+is a defect of ha: `build_codex_command` refuses to return an argv carrying one
+(`model_provider`, `model_providers.*`, `--profile`/`-p`, `--oss`, `--local-provider`),
+so no run, no commit and no provenance can ever carry it, writes included. The detector
+recorded in links and checked at admission, `backend_switches(provider, environment)`,
+reads the effective child environment only. `claude`'s argv has no backend flag ha could
+pass, so it has no argv check.
+
