@@ -13,8 +13,10 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
+from functools import cache
 from importlib import resources
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
@@ -151,6 +153,12 @@ def codex_argv_switches(argv: Sequence[str]) -> tuple[str, ...]:
     return tuple(sorted(found))
 
 
+def _frozen_entries(
+    entries: Mapping[str, Mapping[str, str]],
+) -> Mapping[str, Mapping[str, str]]:
+    return MappingProxyType({key: MappingProxyType(dict(value)) for key, value in entries.items()})
+
+
 class VendorTableError(ValueError):
     """A vendor table cannot be used; the message names the file and why."""
 
@@ -162,6 +170,15 @@ class VendorTable:
     bare: tuple[tuple[str, str], ...]
     opencode: Mapping[str, Mapping[str, str]]
     pairs: Mapping[tuple[str, str], str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # The shipped table is cached and shared: every mapping is frozen, nested ones too,
+        # so no caller can change what another resolves.
+        freeze = object.__setattr__
+        freeze(self, "providers", _frozen_entries(self.providers))
+        freeze(self, "orgs", MappingProxyType(dict(self.orgs)))
+        freeze(self, "opencode", _frozen_entries(self.opencode))
+        freeze(self, "pairs", MappingProxyType(dict(self.pairs)))
 
     def resolve(self, provider: str, model: str, switches: Sequence[str] = ()) -> str:
         if switches:
@@ -256,7 +273,9 @@ def _parse_shipped(document: Mapping[str, object], where: str) -> VendorTable:
     )
 
 
+@cache
 def shipped_table() -> VendorTable:
+    """The package's own table, read and parsed once per process; it cannot be changed."""
     text = resources.files("headless_agents").joinpath(VENDORS_FILE_NAME).read_text("utf-8")
     return _parse_shipped(tomllib.loads(text), f"shipped {VENDORS_FILE_NAME}")
 

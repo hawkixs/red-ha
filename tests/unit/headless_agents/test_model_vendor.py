@@ -209,3 +209,24 @@ def test_every_shipped_vendor_is_a_lowercase_lab_name() -> None:
     names |= {e["vendor"] for e in table.providers.values() if "vendor" in e}
     names |= {e["vendor"] for e in table.opencode.values() if "vendor" in e}
     assert all(re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) for name in names), names
+
+
+def test_the_shipped_table_is_parsed_once() -> None:
+    # Rail note F-12-3: every review planning used to re-read and re-parse the TOML.
+    assert shipped_table() is shipped_table()
+
+
+def test_a_vendor_table_cannot_be_changed_after_it_is_built(tmp_path: Path) -> None:
+    # Rail note F-12-4: the cached shipped table is shared, so nothing may mutate it.
+    table = load_table(
+        _operator(tmp_path, '[[pair]]\nprovider = "openai-compat"\nmodel = "m"\nvendor = "acme"\n')
+    )
+    for mapping in (table.orgs, table.providers, table.opencode, table.pairs):
+        with pytest.raises(TypeError):
+            mapping["x"] = "y"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        table.providers["claude"]["vendor"] = "openai"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        table.opencode["openrouter"]["grammar"] = "bare"  # type: ignore[index]
+    assert shipped_table().resolve("claude", "claude-x") == "anthropic"
+    assert shipped_table().pairs == {}
