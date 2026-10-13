@@ -275,7 +275,10 @@ def _parse_shipped(document: Mapping[str, object], where: str) -> VendorTable:
 
 @cache
 def shipped_table() -> VendorTable:
-    """The package's own table, read and parsed once per process; it cannot be changed."""
+    """The package's own table, parsed on first use and then cached; it cannot be changed.
+
+    Two concurrent first calls may each parse the file; both get the same table.
+    """
     text = resources.files("headless_agents").joinpath(VENDORS_FILE_NAME).read_text("utf-8")
     return _parse_shipped(tomllib.loads(text), f"shipped {VENDORS_FILE_NAME}")
 
