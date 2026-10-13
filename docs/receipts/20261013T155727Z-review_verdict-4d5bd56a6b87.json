@@ -1,0 +1,50 @@
+{
+  "digest": "sha256:4d5bd56a6b8706c24f268c3a1a9dbc879119d0b5dcd52ad990c8987f021e44b2",
+  "idempotency_key": "review_verdict:37be049a5a1fffc3808fa862c42fe4b989a4852e:115396115335",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": false,
+      "carry_forwards": {
+        "addressed": [],
+        "deferred": [
+          "CF-4-3"
+        ]
+      },
+      "check_run_id": 115396115335,
+      "diff_truncated": false,
+      "finding_count": 1,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "If the orgs field's values are themselves mappings (its annotation sits above the visible diff window; only providers/opencode pass through _frozen_entries), MappingProxyType(dict(self.orgs)) would leave inner mappings mutable, and the new test only mutates orgs at the top level. Question to check: ",
+          "file": "src/headless_agents/model_vendor.py",
+          "id": "F-15-1",
+          "line": 179,
+          "severity": "minor",
+          "status": "new",
+          "title": "orgs is frozen only one level deep"
+        }
+      ],
+      "independent": true,
+      "mode": "light",
+      "not_reviewed": [],
+      "pr": 15,
+      "providers": [
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "37be049a5a1fffc3808fa862c42fe4b989a4852e",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T15:57:27.110468Z",
+  "schema_version": 1
+}
