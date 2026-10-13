@@ -1,6 +1,6 @@
 # Vendor rule by model vendor — design
 
-Date: 2026-10-13. Status: proposed (round 2). Follows the vibe rail (PR #9). Amends the
+Date: 2026-10-13. Status: proposed (round 3). Follows the vibe rail (PR #9). Amends the
 vendor rule of spec 0.5.0 §3.8.4 (`src/headless_agents/vendor.py`).
 
 ## 1. Problem
@@ -50,13 +50,17 @@ too, with a message that says what to declare.
   Each fixed-vendor rail declares its **backend switches**: the argv keys and child
   environment variables that can point it elsewhere (`codex`: `model_provider`,
   `model_providers.*`, `--profile`/`-p`, `--oss`, `--local-provider`,
-  `OPENAI_BASE_URL`, `OPENAI_API_BASE`; `claude`: `ANTHROPIC_BASE_URL`,
-  `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`). A pure
-  `backend_switches(provider, argv, environment)` names the switches present. A link
-  with a switch present has the vendor `unknown`: in a review panel this refuses the
-  review at admission, before any member starts; in a write, provenance records the
-  switch (§3.3) so the commit's author is `unknown`. ha does not strip the variable: it
-  may be the operator's deliberate setup for other work.
+  `OPENAI_BASE_URL`, `OPENAI_API_BASE`; `claude`: `ANTHROPIC_BASE_URL`). The
+  `CLAUDE_CODE_*` provider selectors (`CLAUDE_CODE_USE_BEDROCK`, `…_VERTEX`) are not
+  switches: `engine.operator_environment` already removes every `CLAUDE_CODE_*`
+  variable before any child sees it, and that filter stays unchanged. A pure
+  `backend_switches(provider, argv, environment)` names the switches present, applied
+  to the **effective child environment** (after `operator_environment` and the rail's
+  own filtering) and the argv the rail will run. A link with a switch present has the
+  vendor `unknown`: in a review panel this refuses the review at admission, before any
+  member starts; in a write, provenance records the switch (§3.3) so the commit's author
+  is `unknown`. ha adds no stripping of base-URL variables: they may be the operator's
+  deliberate setup for other work.
 - **D3 — fail closed.** A pair the table cannot resolve has the vendor `unknown`.
   `unknown` is never independent of anything: as a reviewer or judge it is refused; as an
   author it makes independence unprovable and refuses the review. The refusal names the
@@ -182,8 +186,11 @@ google.
   The document also records `table_digest` (shipped table plus operator pairs) as
   evidence of what it was judged against; `from_document` does not re-resolve with
   today's table. It validates a new document by vendor: every commit and panel link
-  carries one vendor, `authors` is the sorted union of commit vendors, no panel vendor
-  is `unknown` or in `authors`, and the links of each commit match its `providers`.
+  carries one vendor, `authors` is the sorted union of commit vendors, no author vendor
+  and no panel vendor is `unknown`, no panel vendor is in `authors`, the links of each
+  commit match its `providers`, `panel` is non-empty and every panel role has at least
+  one link. A commit may have no links and no vendors only when it is a presumed
+  hand-written commit (`made_by: hand`, as `_attribution_ha_makes` allows today).
   A document without `rule` is a legacy document and keeps today's provider validation,
   so old reports, `ha show` and `--findings` (`reviews.load_result`) still read.
 
@@ -203,7 +210,7 @@ TDD, unit only (no provider is called):
 - backend switches: the production `codex` and `claude` commands with a clean
   environment have none; `OPENAI_BASE_URL`, `-c model_provider=…`,
   `-c model_providers.x.base_url=…`, `--profile`, `--oss` for codex and
-  `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK` for claude are each named; a panel
+  `ANTHROPIC_BASE_URL` for claude are each named; a panel
   member with a switch is refused at admission before any member starts;
 - provenance: `links` recorded from the role's snapshot with switches; malformed or
   incomplete `links` (empty, a provider of `providers` missing, reordered, non-string
@@ -213,7 +220,18 @@ TDD, unit only (no provider is called):
   unknown reviewer refused; unknown author refuses; judge from the author's lab refused;
   every link of a fallback chain checked;
 - `VendorCheck`: new-shape round-trip including the same-provider/different-lab case;
-  inconsistent vendor evidence rejected; a legacy document still reads.
+  inconsistent vendor evidence rejected; rejected through both `from_document` and
+  `reviews.load_result`: an `unknown` author vendor, an empty `panel`, a panel role with
+  no links, a non-hand commit without links; a legacy document still reads;
+- snapshot integration: the models of a chain link, of the role and of `models.toml`'s
+  default reach admission unchanged from the `SlotPlan`; an author's `--model` override
+  reaches provenance; changing `models.toml` after planning does not change what
+  admission or provenance records; the existing refusal of `--model` on a review
+  workflow keeps passing;
+- effective environment: an operator environment carrying `ANTHROPIC_BASE_URL` (or
+  `OPENAI_BASE_URL`) refuses a review whose panel has `claude` (or `codex`), tested from
+  `operator_environment` through admission; `CLAUDE_CODE_USE_BEDROCK` in the operator
+  environment is filtered out and does not refuse.
 
 ## 5. Non-goals
 
