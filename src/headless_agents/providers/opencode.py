@@ -81,14 +81,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from ..budget import Ledger
+from ..budget import BUDGET_EXHAUSTED, BUDGET_UNMEASURED, Ledger
 from ..capability import (
     AGENT_MARKER_VARIABLE,
+    BUDGET_EXIT_CODE,
     INVALID_USAGE_EXIT_CODE,
     PROVIDER_FALLBACK_EXIT_CODE,
     TIMEOUT_EXIT_CODE,
     TIMEOUT_REPLAYABLE_EXIT_CODE,
     failure_code_after_a_write,
+    kill_process_group,
     terminate_process_group,
 )
 from ..event_log import read_events
@@ -1049,6 +1051,10 @@ def _quota_exhausted(log_path: Path, offset: int) -> tuple[bool, int]:
 #: falls through within a couple of polls, long enough not to spin.
 QUOTA_POLL_SECONDS: Final = 0.5
 
+#: How often a CAPPED run polls (spec 2026-10-13 usage and budget §3.6, A2): a crossing
+#: is noticed within this interval of the ``step_finish`` that made it, then killed at once.
+BUDGET_POLL_SECONDS: Final = 0.1
+
 
 def _deadline_exit_code(
     events_log: Path,
@@ -1137,6 +1143,7 @@ def run_opencode(
     temp_prefix: str = "headless-agents-",
     missing_call_message: str | None = None,
     workspace: Workspace | None = None,
+    meter: StepMeter | None = None,
 ) -> int:
     """Run one opencode invocation and return its code (``124`` on deadline,
     ``4`` on a deadline the stream proves empty, ``3`` if replayable).
@@ -1152,6 +1159,13 @@ def run_opencode(
     stays the ephemeral run directory) and widens the inline config's
     allowlist; in a WRITABLE workspace it also taints the deadline and
     failure codes the way an MCP write does, through :func:`write_tool_started`.
+
+    ``meter`` caps the run (spec 2026-10-13 usage and budget §3.6): the stream is read at
+    every :data:`BUDGET_POLL_SECONDS` poll, and once the run's spend reaches a cap, or a
+    finished call lacks the measure a cap needs, the process group is killed at once
+    (no grace). After a final read, a spend at or over a cap returns ``7`` whoever ended
+    the child, an unmeasured finish ``1``; a spend under every cap is classified as
+    without a meter.
     """
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
@@ -1255,6 +1269,7 @@ def run_opencode(
                 return PROVIDER_FALLBACK_EXIT_CODE
             timed_out = False
             quota_hit = False
+            poll_seconds = BUDGET_POLL_SECONDS if meter is not None else QUOTA_POLL_SECONDS
             try:
                 started = time.monotonic()
                 quota_offset = 0
@@ -1269,8 +1284,13 @@ def run_opencode(
                         timed_out = True
                         break
                     try:
-                        process.wait(timeout=min(QUOTA_POLL_SECONDS, left))
+                        process.wait(timeout=min(poll_seconds, left))
                     except subprocess.TimeoutExpired:
+                        if meter is not None:
+                            meter.read(events_log)
+                            if meter.must_stop:
+                                kill_process_group(process)
+                                break
                         exhausted, quota_offset = _quota_exhausted(stderr_log, quota_offset)
                         if exhausted and _nothing_could_have_been_written(
                             events_log, server, workspace=workspace, mcp=profile.mcp
@@ -1280,6 +1300,13 @@ def run_opencode(
                             break
                         continue
                     break
+                if meter is not None:
+                    meter.read(events_log)
+                    if not meter.must_stop:
+                        meter.read(events_log, final=True)
+                    if meter.must_stop:
+                        kill_process_group(process)
+                        meter.read(events_log, final=True)
             except BaseException:
                 # Ctrl-C reaches ha only (the provider has its own session):
                 # kill the provider's group before the interruption propagates,
@@ -1290,6 +1317,23 @@ def run_opencode(
             finally:
                 # Normal end: the watcher leaves without killing (Q75 = a).
                 lifeline.release()
+
+        if meter is not None:
+            meter.close()
+            if meter.ledger.crossed:
+                with stderr_log.open("a", encoding="utf-8") as stderr_stream:
+                    stderr_stream.write(
+                        f"opencode: the run's budget ({meter.ledger.caps.describe()}) is "
+                        "exhausted: stopped; its text is a partial answer, not an answer\n"
+                    )
+                return BUDGET_EXIT_CODE
+            if meter.unmeasured:
+                with stderr_log.open("a", encoding="utf-8") as stderr_stream:
+                    stderr_stream.write(
+                        "opencode: a finished step reported no usage for the run's budget "
+                        f"({meter.ledger.caps.describe()}): what is left is unknown, stopped\n"
+                    )
+                return 1
 
         if quota_hit:
             with stderr_log.open("a", encoding="utf-8") as stderr_stream:
@@ -1466,6 +1510,7 @@ class OpenCodeProvider:
             )
         start = time.monotonic()
         tripwire = armed_run(workspace)
+        meter = StepMeter(spec.budget) if spec.budget is not None else None
         exit_code = run_opencode(
             prompt=prompt,
             name=spec.name,
@@ -1483,10 +1528,24 @@ class OpenCodeProvider:
             ephemeral_root=self._ephemeral_root,
             deadline=spec.deadline,
             workspace=workspace,
+            meter=meter,
         )
         duration = time.monotonic() - start
         exit_code, git_tampered = settle_run(tripwire, exit_code, spec.stderr_log)
-        tokens, cost = telemetry(spec.events_log)
+        if meter is not None:
+            metered = meter.usage()
+            tokens, cost, usage_complete = metered.tokens, metered.cost_usd, metered.complete
+        else:
+            tokens, cost = telemetry(spec.events_log)
+            usage_complete = not unfinished_step(spec.events_log)
+        failure_reason: str | None = None
+        partial_text: str | None = None
+        if meter is not None and not git_tampered:
+            if exit_code == BUDGET_EXIT_CODE:
+                failure_reason = BUDGET_EXHAUSTED
+                partial_text = report_text(spec.events_log) or None
+            elif exit_code == 1 and meter.unmeasured:
+                failure_reason = BUDGET_UNMEASURED
         return record(
             spec,
             RunResult(
@@ -1505,5 +1564,8 @@ class OpenCodeProvider:
                 stderr_log=spec.stderr_log,
                 workspace=workspace_summary(workspace, git_tampered),
                 context=context,
+                partial_text=partial_text,
+                failure_reason=failure_reason,
+                usage_complete=usage_complete,
             ),
         )

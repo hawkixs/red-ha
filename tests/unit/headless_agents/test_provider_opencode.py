@@ -15,6 +15,7 @@ import os
 import shlex
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from pydantic import SecretStr
 from headless_agents import procgroup
 from headless_agents.budget import Caps, Ledger
 from headless_agents.capability import (
+    BUDGET_EXIT_CODE,
     INVALID_USAGE_EXIT_CODE,
     PROVIDER_FALLBACK_EXIT_CODE,
     TIMEOUT_EXIT_CODE,
@@ -599,6 +601,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeProcess) -> dict[str, o
 
     monkeypatch.setattr(opencode.subprocess, "Popen", popen)
     monkeypatch.setattr(opencode, "terminate_process_group", lambda process: process.kill())
+    monkeypatch.setattr(opencode, "kill_process_group", lambda process: process.kill())
     monkeypatch.setattr(opencode.time, "monotonic", lambda: fake.clock)
     return captured
 
@@ -1728,3 +1731,422 @@ class TestStepUsage:
             cost_usd=0.5,
             complete=False,
         )
+
+
+# ── budget enforcement (spec 2026-10-13 usage and budget §3.6, A2) ──────────
+
+
+def _paced_opencode_script(
+    tmp_path: Path,
+    *chunks: tuple[str, float],
+    then: str = "sleep 30",
+    ignore_sigterm: bool = False,
+    pid_file: Path | None = None,
+    name: str = "opencode",
+    prelude: str | None = None,
+) -> Path:
+    """A REAL child writing its stream over time: each chunk is printed, then the script
+    sleeps for its delay; ``then`` ends it (``exit 0``, or a long ``sleep`` that only a
+    kill ends). ``ignore_sigterm`` makes a graceful termination wait its whole grace;
+    ``prelude`` runs first (a descendant left in the group, say)."""
+    script = tmp_path / name
+    lines = ["#!/usr/bin/env bash"]
+    if ignore_sigterm:
+        lines.append("trap '' TERM")
+    if prelude is not None:
+        lines.append(prelude)
+    if pid_file is not None:
+        lines.append(f"echo $$ > {shlex.quote(str(pid_file))}")
+    for text, delay in chunks:
+        lines.append(f"printf '%s' {shlex.quote(text)}")
+        if delay:
+            lines.append(f"sleep {delay}")
+    lines.append(then)
+    script.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    script.chmod(0o755)
+    return script
+
+
+def _capped_run(tmp_path: Path, script: Path, caps: Caps) -> tuple[int, Ledger, float]:
+    ledger = Ledger(caps)
+    started = time.monotonic()
+    code = _run(
+        tmp_path,
+        executable=str(script),
+        profile=_profile(mcp=None),
+        meter=opencode.StepMeter(ledger),
+        timeout_seconds=20.0,
+    )
+    return code, ledger, time.monotonic() - started
+
+
+class TestBudgetEnforcement:
+    def test_a_crossing_kills_the_group_at_once_and_exits_7(self, tmp_path: Path) -> None:
+        pid_file = tmp_path / "pid"
+        script = _paced_opencode_script(
+            tmp_path,
+            (_events(_start("s1"), _text("so far"), _finish("f1", cost=0.5)), 0),
+            ignore_sigterm=True,
+            pid_file=pid_file,
+        )
+        code, ledger, elapsed = _capped_run(tmp_path, script, Caps(max_cost=0.5))
+        assert code == BUDGET_EXIT_CODE
+        assert elapsed < 3.0, f"took {elapsed:.1f}s: the kill waited for a grace"
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text().strip()), 0)
+        assert ledger.record()["spent_cost"] == 0.5 and ledger.steps_after_crossing == 0
+        stderr = (tmp_path / "out" / "stderr.log").read_text(encoding="utf-8")
+        assert "budget (max_cost 0.5 USD) is exhausted" in stderr
+
+    def test_a_part_re_emitted_across_polls_is_counted_once(self, tmp_path: Path) -> None:
+        script = _paced_opencode_script(
+            tmp_path,
+            (_events(_start("s1"), _finish("f1", cost=0.25)), 0.4),
+            (_events(_finish("f1", cost=0.5), _text("REPORT")), 0),
+            then="exit 0",
+        )
+        code, ledger, _ = _capped_run(tmp_path, script, Caps(max_cost=0.75))
+        assert code == 0, "0.25 then 0.5 of one part is 0.5, under the cap"
+        assert ledger.record()["spent_cost"] == 0.5
+
+    def test_a_line_split_across_two_polls_is_read_whole(self, tmp_path: Path) -> None:
+        line = _events(_finish("f1", input=600, cache_read=600))
+        script = _paced_opencode_script(
+            tmp_path, (_events(_start("s1")) + line[:50], 0.4), (line[50:], 0)
+        )
+        code, ledger, elapsed = _capped_run(tmp_path, script, Caps(max_input_tokens=1000))
+        assert code == BUDGET_EXIT_CODE and elapsed < 3.0
+        assert ledger.record()["spent_input_tokens"] == 1200
+
+    def test_two_steps_finishing_inside_one_poll_both_count(self, tmp_path: Path) -> None:
+        script = _paced_opencode_script(
+            tmp_path,
+            (
+                _events(
+                    _start("s1"),
+                    _finish("f1", cost=0.5),
+                    _start("s2"),
+                    _finish("f2", cost=0.25),
+                ),
+                0,
+            ),
+        )
+        code, ledger, _ = _capped_run(tmp_path, script, Caps(max_cost=0.5))
+        assert code == BUDGET_EXIT_CODE
+        assert ledger.record() == {
+            "max_cost": 0.5,
+            "max_input_tokens": None,
+            "spent_cost": 0.75,
+            "spent_input_tokens": 200,
+            "spent_complete": True,
+            "overshoot_cost": 0.25,
+            "overshoot_input_tokens": None,
+        }
+        assert ledger.steps_after_crossing == 1
+
+    def test_an_own_exit_and_a_kill_at_the_same_spend_give_the_same_record(
+        self, tmp_path: Path
+    ) -> None:
+        stream = _events(_start("s1"), _text("so far"), _finish("f1", input=900, cache_read=300))
+        records = []
+        for then in ("exit 0", "sleep 30"):
+            work = tmp_path / then.replace(" ", "-")
+            work.mkdir()
+            script = _paced_opencode_script(work, (stream, 0), then=then)
+            code, ledger, _ = _capped_run(work, script, Caps(max_input_tokens=1000))
+            assert code == BUDGET_EXIT_CODE, then
+            records.append((ledger.record(), ledger.steps_after_crossing))
+        assert records[0] == records[1]
+        assert records[0][0]["overshoot_input_tokens"] == 200
+
+    @pytest.mark.parametrize(
+        ("finish", "code"),
+        [(_finish("f1", cost=0.5), BUDGET_EXIT_CODE), (_finish("f1", cost=_NO_COST), 1)],
+    )
+    def test_a_stop_found_after_the_leader_exited_kills_what_it_left_running(
+        self, tmp_path: Path, finish: dict[str, object], code: int
+    ) -> None:
+        # The leader leaves a sleeping descendant in its group, writes the finish that stops
+        # the run and exits at once: the final read finds it after the leader is gone.
+        descendant = tmp_path / "descendant.pid"
+        script = _paced_opencode_script(
+            tmp_path,
+            (_events(_start("s1"), _text("so far"), finish), 0),
+            then="exit 0",
+            prelude=f"sleep 30 & echo $! > {shlex.quote(str(descendant))}",
+        )
+        returned, ledger, _ = _capped_run(tmp_path, script, Caps(max_cost=0.5))
+        assert returned == code
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(descendant.read_text().strip()), 0)
+
+    def test_what_the_group_writes_until_its_kill_is_counted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The leader exits after its crossing finish; a descendant still alive appends one
+        # more finish between the final read and the kill (the kill stub writes it).
+        stream = _events(_start("s1"), _text("so far"), _finish("f1", cost=0.5))
+        _install(monkeypatch, _FakeProcess(returncode=0, events=stream))
+        events_log = tmp_path / "out" / "events.jsonl"
+
+        def late_finish_then_kill(process: _FakeProcess) -> None:
+            _append(events_log, _events(_start("s2"), _finish("f2", cost=0.25)))
+            process.kill()
+
+        monkeypatch.setattr(opencode, "kill_process_group", late_finish_then_kill)
+        ledger = Ledger(Caps(max_cost=0.5))
+        code = _run(tmp_path, profile=_profile(mcp=None), meter=opencode.StepMeter(ledger))
+        assert code == BUDGET_EXIT_CODE
+        record = ledger.record()
+        assert (record["spent_cost"], record["spent_complete"], record["overshoot_cost"]) == (
+            0.75,
+            True,
+            0.25,
+        )
+        assert ledger.steps_after_crossing == 1
+
+    def test_a_capped_run_polls_every_tenth_of_a_second(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        timeouts: list[float | None] = []
+
+        class _Recording(_FakeProcess):
+            def wait(self, timeout: float | None = None) -> int:
+                timeouts.append(timeout)
+                return super().wait(timeout)
+
+        for meter in (None, opencode.StepMeter(Ledger(Caps(max_cost=1.0)))):
+            work = tmp_path / ("capped" if meter else "uncapped")
+            work.mkdir()
+            _install(monkeypatch, _Recording(returncode=0, events=GOOD_EVENTS))
+            _run(work, meter=meter)
+        assert timeouts == [opencode.QUOTA_POLL_SECONDS, opencode.BUDGET_POLL_SECONDS]
+        assert opencode.BUDGET_POLL_SECONDS == 0.1
+
+    def test_a_natural_failure_under_the_caps_keeps_its_classification(
+        self, tmp_path: Path
+    ) -> None:
+        stream = _events(_start("s1"), _finish("f1", cost=0.25))  # no text: no report
+        codes = []
+        for meter in (None, opencode.StepMeter(Ledger(Caps(max_cost=1.0)))):
+            work = tmp_path / ("capped" if meter else "uncapped")
+            work.mkdir()
+            script = _paced_opencode_script(work, (stream, 0), then="exit 0")
+            codes.append(
+                _run(work, executable=str(script), profile=_profile(mcp=None), meter=meter)
+            )
+        assert codes == [PROVIDER_FALLBACK_EXIT_CODE, PROVIDER_FALLBACK_EXIT_CODE]
+
+    def test_a_finish_without_its_measure_kills_at_once_and_exits_1(self, tmp_path: Path) -> None:
+        script = _paced_opencode_script(
+            tmp_path,
+            (_events(_start("s1"), _finish("f1", cost=_NO_COST)), 0),
+            ignore_sigterm=True,
+        )
+        code, ledger, elapsed = _capped_run(tmp_path, script, Caps(max_cost=1.0))
+        assert code == 1 and elapsed < 3.0
+        assert ledger.record()["spent_complete"] is False
+        stderr = (tmp_path / "out" / "stderr.log").read_text(encoding="utf-8")
+        assert "reported no usage for the run's budget (max_cost 1 USD)" in stderr
+
+    def test_a_cost_too_large_for_a_float_stops_the_run_unmeasured(self, tmp_path: Path) -> None:
+        later = tmp_path / "later"
+        script = _paced_opencode_script(
+            tmp_path,
+            (_events(_start("s1"), _finish("f1", cost=0.25), _finish("f2", cost=10**400)), 0.5),
+            then=f"touch {shlex.quote(str(later))}; sleep 30",
+        )
+        code, ledger, elapsed = _capped_run(tmp_path, script, Caps(max_cost=1.0))
+        assert code == 1 and elapsed < 3.0
+        assert not later.exists(), "the child went on after the unmeasured finish"
+        assert ledger.unmeasured and ledger.record() == {
+            "max_cost": 1.0,
+            "max_input_tokens": None,
+            "spent_cost": 0.25,
+            "spent_input_tokens": 200,
+            "spent_complete": False,
+            "overshoot_cost": None,
+            "overshoot_input_tokens": None,
+        }
+
+    def test_a_measured_zero_is_no_reason_to_stop(self, tmp_path: Path) -> None:
+        script = _paced_opencode_script(
+            tmp_path,
+            (_events(_start("s1"), _finish("f1", input=0, cost=0), _text("REPORT")), 0),
+            then="exit 0",
+        )
+        code, ledger, _ = _capped_run(tmp_path, script, Caps(max_cost=1.0, max_input_tokens=10))
+        assert code == 0 and ledger.record()["spent_complete"] is True
+
+    def test_a_crossing_then_a_call_killed_in_flight_exits_7_with_a_lower_bound(
+        self, tmp_path: Path
+    ) -> None:
+        script = _paced_opencode_script(
+            tmp_path, (_events(_start("s1"), _finish("f1", cost=0.5), _start("s2")), 0)
+        )
+        code, ledger, _ = _capped_run(tmp_path, script, Caps(max_cost=0.5))
+        assert code == BUDGET_EXIT_CODE
+        record = ledger.record()
+        assert (record["spent_cost"], record["spent_complete"], record["overshoot_cost"]) == (
+            0.5,
+            False,
+            None,
+        )
+
+    def test_the_same_inputs_uncapped_run_as_today(self, tmp_path: Path) -> None:
+        script = _paced_opencode_script(
+            tmp_path,
+            (_events(_start("s1"), _text("REPORT"), _finish("f1", cost=50.0)), 0),
+            then="exit 0",
+        )
+        code = _run(tmp_path, executable=str(script), profile=_profile(mcp=None))
+        assert code == 0
+
+
+def _metered_fake(events: str, code: int) -> tuple[Callable[..., int], list[dict[str, object]]]:
+    """A ``run_opencode`` stand-in that writes ``events`` and meters them as the real one
+    does after its child exits."""
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> int:
+        calls.append(kwargs)
+        events_log = kwargs["events_log"]
+        assert isinstance(events_log, Path)
+        events_log.parent.mkdir(parents=True, exist_ok=True)
+        events_log.write_text(events, encoding="utf-8")
+        meter = kwargs["meter"]
+        if isinstance(meter, opencode.StepMeter):
+            meter.read(events_log, final=True)
+            meter.close()
+        return code
+
+    return fake_run, calls
+
+
+class TestBudgetResult:
+    def _spec(self, tmp_path: Path, ledger: Ledger | None) -> RunSpec:
+        return RunSpec(
+            prompt="P",
+            model="opencode-go/m",
+            profile=_profile(mcp=None),
+            run_dir=tmp_path / "runs" / "r1",
+            budget=ledger,
+        )
+
+    def test_the_runs_ledger_meters_the_step(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        fake_run, calls = _metered_fake(GOOD_EVENTS, 0)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        ledger = Ledger(Caps(max_cost=1.0))
+        opencode.OpenCodeProvider().run(self._spec(tmp_path, ledger))
+        meter = calls[0]["meter"]
+        assert isinstance(meter, opencode.StepMeter) and meter.ledger is ledger
+        opencode.OpenCodeProvider().run(self._spec(tmp_path / "uncapped", None))
+        assert calls[1]["meter"] is None
+
+    def test_a_budget_stop_keeps_its_partial_apart_from_any_answer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(_start("s1"), _text("half of it"), _finish("f1", cost=0.5))
+        fake_run, _ = _metered_fake(events, BUDGET_EXIT_CODE)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, Ledger(Caps(max_cost=0.5))))
+        assert (result.exit_code, result.text, result.partial_text) == (
+            BUDGET_EXIT_CODE,
+            None,
+            "half of it",
+        )
+        assert (result.failure_reason, result.usage_complete) == ("budget_exhausted", True)
+        assert result.cost_usd == 0.5
+        written = json.loads((tmp_path / "runs" / "r1" / "result.json").read_text())
+        assert written == result.to_dict() and "partial_text" not in written
+
+    def test_an_unmeasured_stop_says_why_and_its_usage_is_a_lower_bound(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(_start("s1"), _finish("f1", cost=0.25), _finish("f2", cost=_NO_COST))
+        fake_run, _ = _metered_fake(events, 1)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, Ledger(Caps(max_cost=1.0))))
+        assert (result.exit_code, result.failure_reason) == (1, "budget_unmeasured")
+        assert result.partial_text is None and result.usage_complete is False
+
+    def test_a_call_killed_in_flight_uncapped_is_a_lower_bound_and_nothing_else(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(_start("s1"), _finish("f1"), _start("s2"))
+        fake_run, _ = _metered_fake(events, TIMEOUT_EXIT_CODE)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, None))
+        assert (result.exit_code, result.failure_reason, result.partial_text) == (
+            TIMEOUT_EXIT_CODE,
+            None,
+            None,
+        )
+        assert result.usage_complete is False and result.tokens is not None
+
+    def test_a_tripwire_outranks_a_budget_stop(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(_start("s1"), _text("half"), _finish("f1", cost=0.5))
+        fake_run, _ = _metered_fake(events, BUDGET_EXIT_CODE)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        monkeypatch.setattr(opencode, "settle_run", lambda tripwire, code, log: (1, (".git/HEAD",)))
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, Ledger(Caps(max_cost=0.5))))
+        assert (result.exit_code, result.failure_reason, result.partial_text) == (1, None, None)
+
+    def test_a_capped_result_carries_the_meters_validated_usage_never_a_nan(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(
+            _start("s1"), _finish("f1", cost=0.25), _start("s2"), _finish("f2", cost=float("nan"))
+        )
+        fake_run, _ = _metered_fake(events, 1)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, Ledger(Caps(max_cost=1.0))))
+        assert (result.exit_code, result.failure_reason) == (1, "budget_unmeasured")
+        assert (result.cost_usd, result.usage_complete) == (0.25, False)
+        assert result.tokens == TokenUsage(input=200, output=20, fresh=200, cached=0, thinking=0)
+        assert "NaN" not in (tmp_path / "runs" / "r1" / "result.json").read_text()
+
+    def test_a_cost_reported_without_tokens_is_the_results_cost(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(_start("s1"), _text("REPORT"), _finish("f1", cost=0.5, tokens=False))
+        fake_run, _ = _metered_fake(events, 0)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, Ledger(Caps(max_cost=1.0))))
+        assert (result.exit_code, result.tokens, result.cost_usd) == (0, None, 0.5)
+        assert result.usage_complete is True
+
+    def test_a_cost_too_large_for_a_float_never_raises_in_a_capped_result(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events = _events(_start("s1"), _finish("f1", cost=0.25), _finish("f2", cost=10**400))
+        fake_run, _ = _metered_fake(events, 1)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        ledger = Ledger(Caps(max_cost=1.0))
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, ledger))
+        assert (result.exit_code, result.failure_reason, result.cost_usd) == (
+            1,
+            "budget_unmeasured",
+            0.25,
+        )
+        assert ledger.record()["overshoot_cost"] is None
+
+    def test_a_block_without_output_keeps_its_known_input_in_the_result(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        no_output = {
+            "type": "step_finish",
+            "part": {"id": "f1", "cost": 0.25, "tokens": {"input": 100, "cache": {"read": 50}}},
+        }
+        events = _events(_start("s1"), _text("REPORT"), no_output)
+        fake_run, _ = _metered_fake(events, 0)
+        monkeypatch.setattr(opencode, "run_opencode", fake_run)
+        ledger = Ledger(Caps(max_input_tokens=1000))
+        result = opencode.OpenCodeProvider().run(self._spec(tmp_path, ledger))
+        assert result.tokens == TokenUsage(input=150, output=None, fresh=100, cached=50)
+        assert (result.cost_usd, result.usage_complete) == (0.25, True)
+        assert ledger.record()["spent_input_tokens"] == 150
