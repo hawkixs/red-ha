@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from headless_agents.envelope import (
     Reply,
     agy_usage,
@@ -30,6 +32,12 @@ TOOL_COUNTS = FIXTURES / "tool_counts"
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("raw", ["1" + "0" * 400, "1e400", "NaN", "Infinity"])
+def test_a_cost_too_large_for_a_float_is_not_measured(raw: str) -> None:
+    envelope = extract_claude('{"total_cost_usd": ' + raw + "}")
+    assert envelope is not None and envelope.cost_usd is None
 
 
 class TestClaudeUsage:

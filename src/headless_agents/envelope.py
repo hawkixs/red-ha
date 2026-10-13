@@ -27,6 +27,7 @@ running while losing its measurement.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -61,7 +62,11 @@ def _number(data: Mapping[str, object], key: str) -> float | None:
     value = data.get(key)
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _load_object(stdout: str) -> Mapping[str, object] | None:

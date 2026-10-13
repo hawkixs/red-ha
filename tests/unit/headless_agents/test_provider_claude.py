@@ -21,7 +21,9 @@ from headless_agents.engine import operator_environment
 from headless_agents.model_vendor import backend_switches
 from headless_agents.profile import CapabilityProfile, McpServer, Workspace
 from headless_agents.providers import claude
+from headless_agents.result import TokenUsage
 from headless_agents.spec import RunSpec
+from headless_agents.usage import StreamMark
 from headless_agents.workspace import workspace_summary
 
 URL = "http://127.0.0.1:8765/mcp"
@@ -118,6 +120,8 @@ class TestBuildClaudeCommand:
             "m",
             "--max-turns",
             "3",
+            "--output-format",
+            "json",
             "--permission-mode",
             "bypassPermissions",
             "--tools",
@@ -386,15 +390,19 @@ class TestToolCallCompleted:
 
 
 class _FakeProcess:
-    def __init__(self, *, returncode: int, output: str = "", hang: bool = False) -> None:
+    def __init__(
+        self, *, returncode: int, output: str = "", hang: bool = False, err: str = ""
+    ) -> None:
         self._returncode = returncode
         self._output = output
+        self._err = err
         self._hang = hang
         self.returncode: int | None = None
         self.pid = 4242
 
-    def bind(self, stream: object) -> None:
+    def bind(self, stream: object, err_stream: object = None) -> None:
         self._stream = stream
+        self._err_stream = err_stream
 
     def communicate(
         self, input: str | None = None, timeout: float | None = None
@@ -402,6 +410,11 @@ class _FakeProcess:
         if self._hang:
             raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout or 0)
         self._stream.write(self._output)  # type: ignore[attr-defined]
+        # A real child writes through the file descriptor; the fake writes through a buffered Python stream, so it flushes, or a read of the file sees nothing.
+        self._stream.flush()  # type: ignore[attr-defined]
+        if self._err:
+            self._err_stream.write(self._err)  # type: ignore[union-attr]
+            self._err_stream.flush()  # type: ignore[union-attr]
         self.returncode = self._returncode
         return None, None
 
@@ -421,7 +434,7 @@ def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeProcess) -> dict[str, o
     def popen(command: list[str], **kwargs: object) -> _FakeProcess:
         captured["command"] = command
         captured["kwargs"] = kwargs
-        fake.bind(kwargs["stdout"])
+        fake.bind(kwargs["stdout"], kwargs["stderr"])
         return fake
 
     monkeypatch.setattr(claude.subprocess, "Popen", popen)
@@ -462,8 +475,11 @@ class TestRunClaude:
             "PATH": "/usr/bin",
             "EXAMPLE_TOKEN": "t",
         }
-        assert kwargs["stderr"] is subprocess.STDOUT
-        assert (tmp_path / "out" / "raw.log").read_text(encoding="utf-8") == "ok\n"
+        out = tmp_path / "out"
+        assert kwargs["stderr"] is not subprocess.STDOUT
+        assert (out / "raw.log").read_text(encoding="utf-8") == ""
+        assert (out / "raw.log.envelope.json").read_text(encoding="utf-8") == "ok\n"
+        assert (out / "raw.log.answer.txt").read_text(encoding="utf-8") == "ok\n"
 
     def test_the_worker_names_itself_so_the_rail_records_an_agent(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -505,7 +521,7 @@ class TestRunClaude:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         output = 'body: "claude_code.tool_result"\nattributes: { tool_name: "mcp_tool", success: "true" }\n'
-        _install(monkeypatch, _FakeProcess(returncode=5, output=output))
+        _install(monkeypatch, _FakeProcess(returncode=5, err=output))
         assert _run(tmp_path) == 5
 
     def test_a_childs_own_fallback_code_after_a_completed_call_never_advances_a_chain(
@@ -515,7 +531,7 @@ class TestRunClaude:
         failure, or the chain would replay a run that provably wrote."""
         output = 'body: "claude_code.tool_result"\nattributes: { tool_name: "mcp_tool", success: "true" }\n'
         for code in (PROVIDER_FALLBACK_EXIT_CODE, TIMEOUT_REPLAYABLE_EXIT_CODE):
-            _install(monkeypatch, _FakeProcess(returncode=code, output=output))
+            _install(monkeypatch, _FakeProcess(returncode=code, err=output))
             assert _run(tmp_path) == 1, code
 
     def test_timeouts(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -541,7 +557,9 @@ class TestRunClaude:
                 self, input: str | None = None, timeout: float | None = None
             ) -> tuple[None, None]:
                 self.streams["stdout"].write("the answer\n")
+                self.streams["stdout"].flush()
                 self.streams["stderr"].write('body: "claude_code.api_request"\n')
+                self.streams["stderr"].flush()
                 self.returncode = 0
                 return None, None
 
@@ -588,39 +606,39 @@ class TestClaudeProvider:
         )
         result = claude.ClaudeProvider().run(spec)
         assert result.exit_code == 0 and result.provider == "claude"
-        assert result.report_path == tmp_path / "raw.log"
+        assert result.report_path == tmp_path / "raw.log.answer.txt"
         assert calls[0]["max_turns"] == 4 and calls[0]["mcp"] == _server()
 
-    def test_text_is_only_what_this_run_appended_to_a_reused_log(
+    def test_a_raw_log_only_run_reads_its_own_answer_file(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         raw_log = tmp_path / "raw.log"
         raw_log.write_text("PREVIOUS RUN\n", encoding="utf-8")
+        answer = tmp_path / "raw.log.answer.txt"
+        answer.write_text("PREVIOUS ANSWER\n", encoding="utf-8")
 
         def fake_run_claude(**kwargs: object) -> int:
-            raw = kwargs["raw_log"]
-            assert isinstance(raw, Path)
-            with raw.open("a", encoding="utf-8") as stream:
-                stream.write("THIS RUN\n")
+            assert kwargs["answer_log"] is None
+            assert not answer.exists(), "a stale answer must be gone before the run"
+            answer.write_text("THIS RUN\n", encoding="utf-8")
             return 0
 
         monkeypatch.setattr(claude, "run_claude", fake_run_claude)
         result = claude.ClaudeProvider().run(RunSpec(prompt="P", model="m", raw_log=raw_log))
         assert result.text == "THIS RUN\n"
+        assert result.report_path == answer
 
     def test_an_answer_that_is_json_comes_back_verbatim(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A judge's verdict is JSON. A ``result`` key in it must not be read as
-        claude's --output-format envelope, which this rail never requests."""
+        """A judge's verdict is JSON: the answer file holds it as written, never re-read
+        as an envelope."""
         verdict = '{"result": "pass", "score": 3}\n'
 
         def fake_run_claude(**kwargs: object) -> int:
             raw = kwargs["raw_log"]
             assert isinstance(raw, Path)
-            raw.parent.mkdir(parents=True, exist_ok=True)
-            with raw.open("a", encoding="utf-8") as stream:
-                stream.write(verdict)
+            claude.claude_answer_path(raw, None).write_text(verdict, encoding="utf-8")
             return 0
 
         monkeypatch.setattr(claude, "run_claude", fake_run_claude)
@@ -1082,7 +1100,7 @@ class TestStructuredOutput:
     answer is the result envelope's ``structured_output``, and every other shape
     exits 1 -- the envelope's ``result`` text never stands in for it."""
 
-    def test_argv_without_a_schema_is_unchanged(self, tmp_path: Path) -> None:
+    def test_argv_without_a_schema_asks_for_the_json_envelope(self, tmp_path: Path) -> None:
         config = tmp_path / "m.json"
         assert claude.build_claude_command(
             model="m", max_turns=3, mcp_config_path=config, mcp=None
@@ -1094,6 +1112,8 @@ class TestStructuredOutput:
             "m",
             "--max-turns",
             "3",
+            "--output-format",
+            "json",
             "--permission-mode",
             "bypassPermissions",
             "--tools",
@@ -1116,9 +1136,7 @@ class TestStructuredOutput:
             )
             assert none == base
 
-    def test_argv_with_a_schema_adds_the_json_output_and_the_inline_schema(
-        self, tmp_path: Path
-    ) -> None:
+    def test_argv_with_a_schema_adds_only_the_inline_schema(self, tmp_path: Path) -> None:
         config = tmp_path / "m.json"
         for workspace in (None, Workspace(path=tmp_path), Workspace(path=tmp_path, write=True)):
             base = claude.build_claude_command(
@@ -1133,8 +1151,8 @@ class TestStructuredOutput:
                 json_schema=SCHEMA_TEXT,
             )
             i = base.index("--max-turns") + 2
-            flags = ["--output-format", "json", "--json-schema", SCHEMA_TEXT]
-            assert with_schema == base[:i] + flags + base[i:]
+            assert base[i : i + 2] == ["--output-format", "json"]
+            assert with_schema == base[: i + 2] + ["--json-schema", SCHEMA_TEXT] + base[i + 2 :]
 
     def test_a_measured_success_envelope_gives_the_structured_output_as_text(
         self, tmp_path: Path
@@ -1149,7 +1167,10 @@ class TestStructuredOutput:
         assert result.text == expected
         assert (run_dir / "report.log").read_text(encoding="utf-8") == expected
         assert (run_dir / "claude-result.json").read_bytes() == fixture.read_bytes()
-        assert result.tokens is None and result.cost_usd is None
+        assert (result.tokens, result.cost_usd) == (
+            TokenUsage(input=9499, output=100, fresh=9499, cached=0, thinking=43),
+            0.019488,
+        )
 
     @pytest.mark.parametrize("subtype", ["error_max_turns", "error_max_structured_output_retries"])
     def test_an_error_subtype_exits_1_and_names_it(self, tmp_path: Path, subtype: str) -> None:
@@ -1285,3 +1306,282 @@ class TestStructuredOutput:
         command = claude.ClaudeProvider().build_command(spec)
         assert command[command.index("--output-format") + 1] == "json"
         assert command[command.index("--json-schema") + 1] == SCHEMA_TEXT
+
+
+# ── JSON on every run (spec 2026-10-13 usage and budget §3.1, D2) ───────────
+
+
+class TestJsonOnEveryRun:
+    def test_the_answer_log_gets_the_result_and_the_envelope_stays_beside_it(
+        self, tmp_path: Path
+    ) -> None:
+        stdout = tmp_path / "stdout.json"
+        stdout.write_text(
+            json.dumps({"type": "result", "result": "the answer\n", "modelUsage": {}}),
+            encoding="utf-8",
+        )
+        answer = tmp_path / "out" / "report.log"
+        code = claude.run_claude(
+            prompt="p",
+            model="m",
+            max_turns=1,
+            timeout_seconds=30,
+            raw_log=tmp_path / "out" / "raw.log",
+            mcp=None,
+            answer_log=answer,
+            executable=_envelope_fake(tmp_path, stdout),
+            environment={"PATH": "/usr/bin:/bin"},
+        )
+        assert code == 0
+        assert answer.read_text(encoding="utf-8") == "the answer\n"
+        envelope = tmp_path / "out" / "report.log.envelope.json"
+        assert envelope.read_bytes() == stdout.read_bytes()
+
+    def test_a_raw_log_only_caller_gets_the_answer_file_and_stderr_alone_in_raw_log(
+        self, tmp_path: Path
+    ) -> None:
+        stdout = tmp_path / "stdout.json"
+        stdout.write_text(json.dumps({"type": "result", "result": "ANSWER"}), encoding="utf-8")
+        executable = _fake(tmp_path, f'cat "{stdout}"\necho "a warning" >&2')
+        raw_log = tmp_path / "raw.log"
+        result = claude.ClaudeProvider().run(
+            RunSpec(
+                prompt="P",
+                model="m",
+                raw_log=raw_log,
+                executable=executable,
+                environment={"PATH": "/usr/bin:/bin"},
+            )
+        )
+        assert result.exit_code == 0
+        assert result.text == "ANSWER"
+        assert result.report_path == tmp_path / "raw.log.answer.txt"
+        assert (tmp_path / "raw.log.answer.txt").read_text(encoding="utf-8") == "ANSWER"
+        assert raw_log.read_text(encoding="utf-8") == "a warning\n"
+
+    def test_stdout_that_is_not_json_is_the_answer_verbatim(self, tmp_path: Path) -> None:
+        executable = _fake(tmp_path, "printf 'plain text\\n'")
+        result = claude.ClaudeProvider().run(
+            RunSpec(
+                prompt="P",
+                model="m",
+                raw_log=tmp_path / "raw.log",
+                report_log=tmp_path / "report.log",
+                executable=executable,
+                environment={"PATH": "/usr/bin:/bin"},
+            )
+        )
+        assert result.exit_code == 0
+        assert result.text == "plain text\n"
+
+    def test_two_concurrent_runs_in_one_directory_keep_distinct_envelopes(
+        self, tmp_path: Path
+    ) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        logs = tmp_path / "logs"
+
+        def run(name: str) -> int:
+            body = tmp_path / f"{name}.json"
+            body.write_text(json.dumps({"type": "result", "result": name}), encoding="utf-8")
+            script = tmp_path / f"fake-{name}"
+            script.write_text(
+                f'#!/usr/bin/env bash\ncat >/dev/null\nsleep 0.2\ncat "{body}"\n',
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            return claude.run_claude(
+                prompt="p",
+                model="m",
+                max_turns=1,
+                timeout_seconds=30,
+                raw_log=logs / f"{name}.raw.log",
+                mcp=None,
+                answer_log=logs / f"{name}.report.log",
+                executable=str(script),
+                environment={"PATH": "/usr/bin:/bin"},
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            codes = list(pool.map(run, ["first", "second"]))
+        assert codes == [0, 0]
+        for name in ("first", "second"):
+            envelope = json.loads(
+                (logs / f"{name}.report.log.envelope.json").read_text(encoding="utf-8")
+            )
+            assert envelope["result"] == name
+            assert (logs / f"{name}.report.log").read_text(encoding="utf-8") == name
+
+    def test_an_envelope_path_that_is_a_log_is_refused_before_anything_runs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def trap(*args: object, **kwargs: object) -> None:
+            pytest.fail("claude was started with its envelope on one of its logs")
+
+        monkeypatch.setattr(claude, "spawn_watched", trap)
+        raw_log = tmp_path / "report.log.envelope.json"
+        with pytest.raises(ValueError, match="envelope"):
+            claude.run_claude(
+                prompt="p",
+                model="m",
+                max_turns=1,
+                timeout_seconds=30,
+                raw_log=raw_log,
+                mcp=None,
+                answer_log=tmp_path / "report.log",
+            )
+        with pytest.raises(ValueError, match="envelope"):
+            claude.ClaudeProvider().run(
+                RunSpec(prompt="P", model="m", raw_log=raw_log, report_log=tmp_path / "report.log")
+            )
+        assert not raw_log.exists()
+
+
+# ── tokens and cost (spec 2026-10-13 usage and budget §3.1) ────────────────
+
+USAGE_FIXTURES = Path(__file__).parent / "fixtures" / "usage"
+MAX_TURNS_USAGE = TokenUsage(input=30004, output=531, fresh=10368, cached=19636, thinking=350)
+
+
+class TestClaudeMeasures:
+    def test_a_run_without_a_schema_measures_and_answers(self, tmp_path: Path) -> None:
+        fixture = USAGE_FIXTURES / "claude.no-schema.json"
+        document = json.loads(fixture.read_text(encoding="utf-8"))
+        run_dir = tmp_path / "runs" / "r1"
+        result = claude.ClaudeProvider().run(
+            _schema_spec(tmp_path, _envelope_fake(tmp_path, fixture), output_schema=None)
+        )
+        assert result.exit_code == 0
+        assert result.text == document["result"]
+        assert (run_dir / "report.log").read_text(encoding="utf-8") == document["result"]
+        assert (run_dir / "report.log.envelope.json").read_bytes() == fixture.read_bytes()
+        assert result.cost_usd == document["total_cost_usd"]
+        assert result.tokens is not None
+        assert result.tokens.input is not None and result.tokens.input > 0
+        written = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+        assert written == result.to_dict()
+
+    def test_two_models_are_summed(self, tmp_path: Path) -> None:
+        fixture = USAGE_FIXTURES / "claude.two-models.synthetic.json"
+        result = claude.ClaudeProvider().run(
+            _schema_spec(tmp_path, _envelope_fake(tmp_path, fixture), output_schema=None)
+        )
+        assert result.exit_code == 0
+        assert result.text == '{"ok":true}'
+        assert result.tokens == TokenUsage(
+            input=10504, output=120, fresh=9504, cached=1000, thinking=43
+        )
+        assert result.cost_usd == 0.020488
+
+    def test_a_max_turns_envelope_measures_but_answers_nothing(self, tmp_path: Path) -> None:
+        """No ``result`` string: the measure stands, the answer and the code stay as
+        today -- exit 1 with no tool call read as provider unavailable (3)."""
+        fixture = FIXTURES / "claude-2.1.283.max-turns.json"
+        run_dir = tmp_path / "runs" / "r1"
+        result = claude.ClaudeProvider().run(
+            _schema_spec(tmp_path, _envelope_fake(tmp_path, fixture, code=1), output_schema=None)
+        )
+        assert result.exit_code == PROVIDER_FALLBACK_EXIT_CODE
+        assert result.text is None
+        assert (run_dir / "report.log").read_text(encoding="utf-8") == ""
+        assert result.tokens == MAX_TURNS_USAGE
+        assert result.cost_usd == 0.025328600000000003
+
+    def test_a_schema_run_that_ran_out_of_turns_still_measures(self, tmp_path: Path) -> None:
+        fixture = FIXTURES / "claude-2.1.283.max-turns.json"
+        result = claude.ClaudeProvider().run(
+            _schema_spec(tmp_path, _envelope_fake(tmp_path, fixture, code=1))
+        )
+        assert result.exit_code == 1
+        assert result.text is None
+        assert (result.tokens, result.cost_usd) == (MAX_TURNS_USAGE, 0.025328600000000003)
+
+    def test_stdout_that_is_not_json_measures_nothing(self, tmp_path: Path) -> None:
+        result = claude.ClaudeProvider().run(
+            _schema_spec(tmp_path, _fake(tmp_path, "printf 'plain\\n'"), output_schema=None)
+        )
+        assert result.exit_code == 0
+        assert result.text == "plain\n"
+        assert (result.tokens, result.cost_usd) == (None, None)
+
+    def test_a_stale_envelope_lends_nothing_to_a_run_that_never_started(
+        self, tmp_path: Path
+    ) -> None:
+        run_dir = tmp_path / "runs" / "r1"
+        run_dir.mkdir(parents=True)
+        success = FIXTURES / "claude-2.1.283.success.json"
+        (run_dir / "report.log.envelope.json").write_bytes(success.read_bytes())
+        spec = _schema_spec(
+            tmp_path,
+            _envelope_fake(tmp_path, success),
+            output_schema=None,
+            environment={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "no-login")},
+        )
+        result = claude.ClaudeProvider().run(spec)
+        assert result.exit_code == PROVIDER_FALLBACK_EXIT_CODE
+        assert (result.tokens, result.cost_usd) == (None, None)
+        assert not (run_dir / "report.log.envelope.json").exists()
+
+    def test_nothing_is_read_when_the_child_never_started(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        def no_read(path: Path) -> str:
+            raise AssertionError(f"read {path} although nothing launched")
+
+        monkeypatch.setattr(claude, "_read_envelope_text", no_read)
+        success = FIXTURES / "claude-2.1.283.success.json"
+        no_login = _schema_spec(
+            tmp_path,
+            _envelope_fake(tmp_path, success),
+            output_schema=None,
+            environment={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "no-login")},
+        )
+        refused = claude.ClaudeProvider().run(no_login)
+        assert refused.exit_code == PROVIDER_FALLBACK_EXIT_CODE
+        assert (refused.tokens, refused.cost_usd) == (None, None)
+        absent = _schema_spec(tmp_path, str(tmp_path / "no-such-claude"), output_schema=None)
+        failed = claude.ClaudeProvider().run(absent)
+        assert failed.exit_code == PROVIDER_FALLBACK_EXIT_CODE
+        assert (failed.tokens, failed.cost_usd) == (None, None)
+
+    def test_a_missing_bearer_refuses_before_the_launch_mark(self, tmp_path: Path) -> None:
+        mark = StreamMark()
+        code = claude.run_claude(
+            prompt="p",
+            model="m",
+            max_turns=1,
+            timeout_seconds=30,
+            raw_log=tmp_path / "raw.log",
+            mcp=McpServer(name="brain", url=URL, tools=("brain_search",)),
+            environment={"PATH": "/usr/bin:/bin"},
+            launch=mark,
+        )
+        assert code == 1
+        assert mark.offset is None
+
+    def test_a_launched_child_sets_the_mark(self, tmp_path: Path) -> None:
+        mark = StreamMark()
+        stdout = tmp_path / "stdout.json"
+        stdout.write_text(json.dumps({"result": "x"}), encoding="utf-8")
+        code = claude.run_claude(
+            prompt="p",
+            model="m",
+            max_turns=1,
+            timeout_seconds=30,
+            raw_log=tmp_path / "raw.log",
+            mcp=None,
+            executable=_envelope_fake(tmp_path, stdout),
+            environment={"PATH": "/usr/bin:/bin"},
+            launch=mark,
+        )
+        assert code == 0
+        assert mark.offset == 0
+
+    def test_an_empty_object_answers_nothing_and_measures_nothing(self, tmp_path: Path) -> None:
+        result = claude.ClaudeProvider().run(
+            _schema_spec(tmp_path, _fake(tmp_path, "printf '{}'"), output_schema=None)
+        )
+        assert result.exit_code == 0
+        assert result.text is None
+        assert (tmp_path / "runs" / "r1" / "report.log").read_text(encoding="utf-8") == ""
+        assert (result.tokens, result.cost_usd) == (None, None)
