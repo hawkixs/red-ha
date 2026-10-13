@@ -1,7 +1,7 @@
 # Usage on every rail and per-run budget caps — design
 
 Date: 2026-10-13. Status: design approved by review, awaiting the operator; decisions approved by the operator (items 10, 13, 15,
-16-22 below), design review by codex (role judge, gpt-6.1-sol): rounds 1-4 REQUEST_CHANGES, round 5 APPROVE; amendments A1-A2. Lot 0.5.6 of headless-agents. Answers
+16-22 below), design review by codex (role judge, gpt-6.1-sol): rounds 1-4 REQUEST_CHANGES, round 5 APPROVE; amendments A1-A3. Lot 0.5.6 of headless-agents. Answers
 ticket 82f066ba (G5, tokens and cost on the claude, codex and agy rails, from
 red-arena) and ticket fe73f648 (a per-run cost/token budget, from brain-v42).
 
@@ -452,3 +452,16 @@ completes within one poll interval of it", with capped polling at 0.1 s, an imme
 kill, sequential spenders and the exact overshoot recorded. The operator's guidance with
 48801c57 ("pas besoin d'être strict sur les limites") covers this precision; reported to
 the coordination with A1.
+
+### A3 — agy's input excludes cache reads (plan, PR1)
+
+§3.1 reads agy's tokens from the final `result` event. On 15 recorded result events,
+`total_tokens` equals `input_tokens + output_tokens` every time while `cache_read_tokens`
+reaches 15 times `input_tokens`: agy's `input_tokens` excludes cache reads, unlike codex
+(whose `cached_input_tokens` is a subset of `input_tokens`). The agy rail therefore
+normalises like the others, so that `input` is the total input D5's cap measures:
+`input` = `input_tokens` + `cache_read_tokens`, `cached` = `cache_read_tokens`, `fresh` =
+`input_tokens`, `output` = `output_tokens` (agy counts thinking inside it), `thinking` =
+`thinking_tokens`. The public `unwrap_agy` keeps its current result. Recorded fixtures live
+under `tests/unit/headless_agents/fixtures/` with the existing ones, not under
+`tests/fixtures/usage/` as §4 first said.
