@@ -4,9 +4,10 @@ Not every field applies to every provider -- ``reasoning_effort`` is
 Codex-only, ``max_turns`` is for Claude and vibe, ``raw_log`` is Claude-only, ``workspace`` is
 Codex-only. Fields irrelevant to a given rail are simply left at their
 default. ``raw_log`` exists as its own field rather than reusing ``events_log``
-or ``report_log`` because Claude does not distinguish them: ``run_claude``
-mixes stdout/stderr into ONE file, and a fallback between the two would invent
-a mapping the caller did not make.
+or ``report_log`` because Claude does not distinguish them: ``raw_log`` receives
+claude's stderr (its OTEL console stream), while its answer goes to ``report_log``
+or beside ``raw_log``; a fallback between the logs would invent a mapping the
+caller did not make.
 
 ``deadline`` is a ``time.monotonic()`` instant. When set, the effective
 timeout of the run is the smaller of ``timeout_seconds`` and the time left

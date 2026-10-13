@@ -23,7 +23,7 @@ import time
 from collections.abc import Mapping
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Final
+from typing import IO, Final
 
 from ..capability import (
     AGENT_MARKER_VARIABLE,
@@ -33,12 +33,14 @@ from ..capability import (
     failure_code_after_a_write,
     terminate_process_group,
 )
+from ..envelope import claude_usage, extract_claude
 from ..procgroup import preexec_for, spawn_watched
 from ..profile import McpServer, Workspace
-from ..result import RunResult
+from ..result import RunResult, TokenUsage
 from ..run_record import answer_text, record, run_id_of
 from ..spec import RunSpec
 from ..structured import parse_json, schema_text
+from ..usage import StreamMark
 from ..workspace import (
     argv_prompt_or_refusal,
     armed_run,
@@ -59,6 +61,75 @@ MAX_APPEND_SYSTEM_PROMPT_BYTES = 131_071
 #: Where a schema-constrained run keeps claude's stdout -- its result envelope --
 #: next to ``report_log``, which receives the answer read from it (0.5.3 lot 1).
 RESULT_ENVELOPE_NAME: Final = "claude-result.json"
+
+#: Beside the log the caller chose for the answer (``answer_log``, else ``raw_log``): the
+#: JSON envelope a run WITHOUT a schema prints on stdout (spec 2026-10-13 usage §3.1).
+ENVELOPE_SUFFIX: Final = ".envelope.json"
+#: Beside ``raw_log`` when the caller passed no ``answer_log``: the answer read from it.
+ANSWER_SUFFIX: Final = ".answer.txt"
+
+
+def _beside(path: Path, suffix: str) -> Path:
+    return path.with_name(path.name + suffix)
+
+
+def claude_envelope_path(raw_log: Path, answer_log: Path | None) -> Path:
+    """Where a run without a schema keeps claude's stdout envelope.
+
+    Named after the caller's own log, so two invocations with distinct logs never share
+    one. ``ValueError`` when that path IS one of the caller's logs: the envelope is
+    truncated when the child starts and would destroy it.
+    """
+    envelope = _beside(answer_log if answer_log is not None else raw_log, ENVELOPE_SUFFIX)
+    logs = {raw_log.resolve()} | ({answer_log.resolve()} if answer_log is not None else set())
+    if envelope.resolve() in logs:
+        raise ValueError(
+            f"claude keeps its JSON envelope in {envelope}, which is already a log of this "
+            "run: name the logs differently"
+        )
+    return envelope
+
+
+def claude_answer_path(raw_log: Path, answer_log: Path | None) -> Path:
+    """Where the answer of a run without a schema lands: ``answer_log``, else
+    ``<raw_log>.answer.txt`` -- ``raw_log`` holds stderr only."""
+    return answer_log if answer_log is not None else _beside(raw_log, ANSWER_SUFFIX)
+
+
+def envelope_answer(stdout: str) -> str:
+    """The answer a run without a schema printed: the envelope's ``result``.
+
+    Stdout that is not a JSON object is the answer verbatim; an envelope without a
+    ``result`` string (a max-turns failure) answers nothing.
+    """
+    envelope = extract_claude(stdout)
+    if envelope is None:
+        return stdout
+    return envelope.text or ""
+
+
+def _read_envelope_text(path: Path) -> str:
+    try:
+        return path.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _measure(envelope_path: Path, launch: StreamMark) -> tuple[TokenUsage | None, float | None]:
+    """``(tokens, cost_usd)`` of this invocation's envelope; ``(None, None)`` without one.
+
+    Nothing is read unless the child launched (spec 2026-10-13 usage §3.1): a refusal
+    or a launch failure leaves ``launch.offset`` at ``None``. Independent of the answer:
+    an envelope without a ``result`` (max turns) still measures; stdout that is not a
+    JSON object does not.
+    """
+    if launch.offset is None:
+        return None, None
+    envelope = extract_claude(_read_envelope_text(envelope_path))
+    if envelope is None:
+        return None, None
+    return claude_usage(envelope), envelope.cost_usd
+
 
 # Ambient variables this rail needs on top of the base allowlist.
 #
@@ -138,9 +209,10 @@ def build_claude_command(
     operator's own user rights, per spec 3.3 -- that confinement, if any, is
     the caller's to provide.
 
-    ``json_schema`` -- compact JSON, inline, as claude takes it -- constrains the
-    answer (0.5.3 lot 1): ``--output-format json --json-schema`` right after
-    ``--max-turns``, nothing else moved. Without it the command is unchanged.
+    Every run asks for ``--output-format json`` right after ``--max-turns`` (spec
+    2026-10-13 usage §3.1, D2): the envelope carries the answer, the tokens and the
+    cost. ``json_schema`` -- compact JSON, inline, as claude takes it -- adds
+    ``--json-schema`` right after it (0.5.3 lot 1).
     """
     if not model.strip():
         raise ValueError("Claude model must not be empty")
@@ -160,9 +232,19 @@ def build_claude_command(
         permission_mode = "acceptEdits" if workspace.write else "dontAsk"
         tools = ",".join(tool_list)
 
-    command = [executable, "-p", "-", "--model", model, "--max-turns", str(max_turns)]
+    command = [
+        executable,
+        "-p",
+        "-",
+        "--model",
+        model,
+        "--max-turns",
+        str(max_turns),
+        "--output-format",
+        "json",
+    ]
     if json_schema is not None:
-        command.extend(("--output-format", "json", "--json-schema", json_schema))
+        command.extend(("--json-schema", json_schema))
     if workspace is not None:
         command.append("--restricted")
     command.extend(("--permission-mode", permission_mode, "--tools", tools))
@@ -347,24 +429,28 @@ def run_claude(
     workspace: Workspace | None = None,
     append_system_prompt: str | None = None,
     json_schema: str | None = None,
+    launch: StreamMark | None = None,
 ) -> int:
     """Run one Claude invocation and return its exit code (``124`` on timeout).
 
-    stdout and stderr land MIXED in ``raw_log``: the OTEL console stream a
-    telemetry splitter consumes travels on stderr alongside the answer, and
-    separating them here would silently deprive that consumer of it.
-
-    ``answer_log`` is the one exception, for a caller that wants the answer
-    ALONE: stdout goes there (truncated first), while stderr -- the OTEL
-    console stream, any CLI warning -- stays in ``raw_log``, where the
-    telemetry consumer and :func:`tool_call_completed` still find it.
-    Without it, nothing changes.
+    Without a schema, stdout is claude's JSON envelope and goes to
+    :func:`claude_envelope_path` (truncated when the child starts); once the child
+    has exited, the envelope's answer (:func:`envelope_answer`) is written to
+    :func:`claude_answer_path` -- ``answer_log`` when given, else
+    ``<raw_log>.answer.txt``. stderr -- the OTEL console stream, any CLI warning --
+    always lands in ``raw_log``, where :func:`tool_call_completed` reads it. With
+    ``json_schema`` nothing moves: stdout goes to ``answer_log`` (or mixes into
+    ``raw_log`` without one), as before.
 
     ``json_schema`` is passed to :func:`build_claude_command`; the caller reads
     the result envelope claude then prints on stdout (:func:`parse_result_envelope`).
+    ``launch`` is set to offset 0 once the child launched: the envelope is truncated
+    at launch, so the whole file is this invocation's.
     """
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    # Spec 2026-10-13 usage §3.1: refused before any file exists.
+    envelope = None if json_schema is not None else claude_envelope_path(raw_log, answer_log)
     # ``None`` inherits: Popen is then called with ``env=None``.
     child_environment = dict(environment) if environment is not None else None
     visible = child_environment if child_environment is not None else os.environ
@@ -379,6 +465,11 @@ def run_claude(
     if answer_log is not None:
         answer_log = answer_log.resolve()
         answer_log.parent.mkdir(parents=True, exist_ok=True)
+    if envelope is None:
+        answer_target = answer_log
+    else:
+        envelope = envelope.resolve()
+        answer_target = claude_answer_path(raw_log, answer_log)
 
     # Spec 0.5.0 §3.8.0 (G7), operator decision Q68=a: no run inherits the
     # operator's claude configuration -- CLAUDE.md, skills, plugins, hooks,
@@ -433,15 +524,31 @@ def run_claude(
         cwd = workspace.path if workspace is not None else runtime_dir
 
         answer_context = (
-            answer_log.open("w", encoding="utf-8") if answer_log is not None else nullcontext()
+            answer_target.open("w", encoding="utf-8")
+            if answer_target is not None
+            else nullcontext()
         )
-        with raw_log.open("a", encoding="utf-8") as raw_stream, answer_context as answer_stream:
+        envelope_context = (
+            envelope.open("w", encoding="utf-8") if envelope is not None else nullcontext()
+        )
+        with (
+            raw_log.open("a", encoding="utf-8") as raw_stream,
+            answer_context as answer_stream,
+            envelope_context as envelope_stream,
+        ):
+            stderr: IO[str] | int = raw_stream
+            if envelope_stream is not None:
+                stdout = envelope_stream
+            elif answer_stream is not None:
+                stdout = answer_stream
+            else:
+                stdout, stderr = raw_stream, subprocess.STDOUT
             try:
                 process, lifeline = spawn_watched(
                     command,
                     stdin=subprocess.PIPE,
-                    stdout=raw_stream if answer_stream is None else answer_stream,
-                    stderr=subprocess.STDOUT if answer_stream is None else raw_stream,
+                    stdout=stdout,
+                    stderr=stderr,
                     cwd=cwd,
                     env=run_environment,
                     text=True,
@@ -452,6 +559,9 @@ def run_claude(
                 raw_stream.write(f"unable to start Claude: {exc}\n")
                 # Claude did not start: nothing could have been written.
                 return PROVIDER_FALLBACK_EXIT_CODE
+
+            if launch is not None:
+                launch.offset = 0
 
             try:
                 process.communicate(
@@ -487,6 +597,9 @@ def run_claude(
                         copied=copied,
                         raw_log=raw_log,
                     )
+            if envelope is not None and answer_stream is not None:
+                # Spec 2026-10-13 usage §3.1: the answer is the envelope's result.
+                answer_stream.write(envelope_answer(_read_envelope_text(envelope)))
 
     exit_code = int(process.returncode or 0)
     if exit_code == 0:
@@ -691,12 +804,16 @@ class ClaudeProvider:
         spec = spec.with_run_dir_defaults()
         assert spec.raw_log is not None, "RunSpec.raw_log (or run_dir) is required for Claude"
         raw_log = spec.raw_log
-        # With a report_log -- named, or given by run_dir -- stdout ALONE is the
-        # answer and lands there; stderr (the OTEL console stream, any CLI
-        # warning) stays in raw_log. Without one, run_claude APPENDS both to
-        # raw_log.
+        # Spec 2026-10-13 usage §3.1: claude prints its JSON envelope on every run. A
+        # schema run keeps claude-result.json; any other keeps it beside the caller's
+        # log, refused here, before any file is touched, when it would be one of them.
         answer_log = spec.report_log
         json_schema, envelope_path = self._structured(spec)
+        if envelope_path is None:
+            envelope_path = claude_envelope_path(raw_log, answer_log)
+        report_path = claude_answer_path(raw_log, answer_log)
+        if answer_log is None:
+            report_path.unlink(missing_ok=True)
         workspace = workspace_of(spec)
         preamble = _preamble_for(spec, workspace)
         refusal = argv_prompt_or_refusal(preamble, MAX_APPEND_SYSTEM_PROMPT_BYTES)
@@ -716,7 +833,7 @@ class ClaudeProvider:
                     exit_code=INVALID_USAGE_EXIT_CODE,
                     provider=self.name,
                     model=spec.model,
-                    report_path=answer_log if answer_log is not None else raw_log,
+                    report_path=report_path,
                     events_log=raw_log,
                     tokens=None,
                     duration_seconds=0.0,
@@ -728,15 +845,12 @@ class ClaudeProvider:
                     context=None if spec.context is None else tuple(spec.context.to_list()),
                 ),
             )
-        # Remember where this run starts, so an answer read from raw_log
-        # never includes what an earlier run left in a reused log.
-        offset = raw_log.stat().st_size if raw_log.is_file() else 0
-        if envelope_path is not None:
-            # Only this run's envelope may be read: a run that never starts must
-            # not find the one an earlier run left beside a reused report_log.
-            envelope_path.unlink(missing_ok=True)
+        # Only this run's envelope and answer may be read: a run that never starts must
+        # not find what an earlier run left beside a reused log.
+        envelope_path.unlink(missing_ok=True)
         start = time.monotonic()
         tripwire = armed_run(workspace)
+        launch = StreamMark()
         exit_code = run_claude(
             prompt=spec.prompt,
             model=spec.model,
@@ -747,32 +861,31 @@ class ClaudeProvider:
             environment=spec.environment,
             executable=spec.executable or "claude",
             deadline=spec.deadline,
-            answer_log=envelope_path if envelope_path is not None else answer_log,
+            answer_log=envelope_path if json_schema is not None else answer_log,
             workspace=workspace,
             append_system_prompt=preamble or None,
             json_schema=json_schema,
+            launch=launch,
         )
         duration = time.monotonic() - start
-        # claude has no separate stderr log: its stderr lands in raw_log.
         exit_code, git_tampered = settle_run(tripwire, exit_code, raw_log)
-        if envelope_path is not None:
+        if json_schema is not None:
             assert answer_log is not None, "_structured requires a report_log"
+            assert envelope_path is not None, "_structured requires an envelope path"
             exit_code, text = _settle_structured(exit_code, envelope_path, answer_log, raw_log)
-        # Without a schema this rail requests no JSON envelope: the text is read
-        # as written.
-        elif answer_log is not None:
-            text = answer_text(answer_log, exit_code=exit_code)
         else:
-            text = answer_text(raw_log, exit_code=exit_code, offset=offset)
+            text = answer_text(report_path, exit_code=exit_code)
+        tokens, cost = _measure(envelope_path, launch)
         return record(
             spec,
             RunResult(
                 exit_code=exit_code,
                 provider=self.name,
                 model=spec.model,
-                report_path=answer_log if answer_log is not None else raw_log,
+                report_path=report_path,
                 events_log=raw_log,
-                tokens=None,
+                tokens=tokens,
+                cost_usd=cost,
                 duration_seconds=duration,
                 tool_call_completed=spec.profile.mcp is not None and tool_call_completed(raw_log),
                 text=text,

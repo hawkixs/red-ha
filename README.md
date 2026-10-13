@@ -147,6 +147,27 @@ real HOME has none. `spec.reasoning_effort` becomes `--variant`; `spec.name`
 becomes the session title. The subscription credential to declare is
 `.local/share/opencode/auth.json`.
 
+### Measured usage by rail
+
+Each rail fills `RunResult.tokens` (and `cost_usd` where its CLI reports a cost) from the
+output its own invocation wrote; a run that never launched measures nothing. `null` means
+not measured, never zero, and ha ships no price table.
+
+| Rail | Tokens | Cost (USD) | Read from |
+|---|---|---|---|
+| claude | measured, every model summed (`input` counts cache reads and cache creation) | measured (`total_cost_usd`) | the JSON envelope claude prints on every run |
+| codex | measured | none (`cost_usd: null`) | the single `turn.completed` of the `--json` stream; a stream with more is not measured |
+| agy | measured (`input` counts cache reads; `unwrap` does not) | none (`cost_usd: null`) | the final `result` event of the stream-json output |
+| opencode | measured | measured | every `step_finish` part, a re-emitted part counted once |
+| openai-compat | measured when the API reports usage | when the router reports it (OpenRouter) | the response body |
+| vibe | not measured | none | Vibe's streaming output carries no usage |
+
+claude runs with `--output-format json`: without a schema its envelope is kept beside the
+caller's log (`<answer_log>.envelope.json`, or `<raw_log>.envelope.json`) and the answer is
+its `result`, written to `answer_log` or, for a raw-log-only caller, to
+`<raw_log>.answer.txt` (the `report_path`); `raw_log` holds stderr only. A schema run keeps
+`claude-result.json`.
+
 ### Structured output
 
 `RunSpec.output_schema` asks for an answer constrained by a JSON Schema: an object-rooted
@@ -858,16 +879,23 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   `exit_code`, `verdict`, `text`, `repository`, `base`, `head`, `branch`, `lineage`,
   `continues`, `findings_from`, `implement_providers`, `commits`, `failure_reason`,
   `vendor_check`, `cleanup`, `pid`, `started_at`, `duration_seconds`, `cost_usd`,
-  `cost_complete` and `steps`. Also at the top: `prompt.md` (the task, written once), and
+  `cost_complete`, `tokens`, `tokens_complete` and `steps`. `tokens` sums each token field
+  over every step and every attempted link that measured it (`null` when none did),
+  `tokens_complete` is false when a step or link measured none, and `cost_usd`/`cost_complete`
+  include attempted links. Also at the top: `prompt.md` (the task, written once), and
   for `--write` the worktree and `change.patch`. Each entry of `steps` names its `provider`,
   `model`, `model_source`, `effort`, `timeout_seconds`, `exit_code`, `tokens`, `cost_usd`,
-  `tools` and `dir` -- the run-relative path of
+  `tools`, `attempts` (one `{provider, model, exit_code, tokens, cost_usd}` per chain link
+  that ran before the final link) and `dir` -- the run-relative path of
   that step's own directory, `steps/<NN>-<slot>-<role>/`, holding its logs, its `commit.log`
   for a write step, and its own `result.json` (schema 1, unchanged, no `"kind"`, still
   `"provider"`): `run.json` is the run's report, `result.json` stays each provider's own
   contract, unaffected by anything above -- a chained role's own link result lands under
   `steps/<NN>-<slot>-<role>/links/<index>-<provider>/` and is copied up to the step's
-  `result.json` for the link that answered. `ha runs` lists runs newest first; `ha clean
+  `result.json` for the link that answered. Every `ha run` that starts ends with one stderr line,
+  `ha: run <id>: exit <code>, cost <usd> USD, input <n> (cached <n>), output <n>`, omitting
+  what was not measured and marking incomplete figures `≥ … (incomplete)`; `ha show` prints
+  the same totals as its `total` line. `ha runs` lists runs newest first; `ha clean
   RUN_ID` removes one (its worktree through git, its branch kept).
 - **Exit codes**: `0` answer, or a review's APPROVE; `1` failure; `2` invalid usage
   (nothing ran); `3` provider unavailable, chain exhausted; `4` timeout with no tool call

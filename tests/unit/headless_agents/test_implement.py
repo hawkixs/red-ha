@@ -24,7 +24,7 @@ from headless_agents import cli, engine, lineage, locks, provenance, quarantine,
 from headless_agents.engine import Overrides, Request, UsageError, execute, plan
 from headless_agents.proofs import CLI_RAILS, record_proof
 from headless_agents.registry import Probe
-from headless_agents.result import RunResult
+from headless_agents.result import RunResult, TokenUsage
 from headless_agents.run_record import record, run_id_of
 from headless_agents.runs import Registry
 from headless_agents.spec import RunSpec
@@ -50,6 +50,8 @@ class _Agent:
     name: str
     edit: Edit | None = None
     code: int = 0
+    tokens: TokenUsage | None = None
+    cost: float | None = None
     specs: list[RunSpec] = field(default_factory=list)
 
     def run(self, spec: RunSpec) -> RunResult:
@@ -68,11 +70,12 @@ class _Agent:
                 model_reported="served-model",
                 report_path=spec.report_log,
                 events_log=spec.events_log,
-                tokens=None,
+                tokens=self.tokens,
                 duration_seconds=0.1,
                 tool_call_completed=False,
                 text="I added it" if self.code == 0 else None,
                 run_id=run_id_of(spec),
+                cost_usd=self.cost,
             ),
         )
 
@@ -603,3 +606,30 @@ def test_the_cli_exits_2_on_a_continuation_refused_after_admission(
     code, _, err = world.cli("run", "build", "--continue", first.run_id, "Turn it on.")
     assert code == 2, err
     assert world.registry().run_ids() == [first.run_id]
+
+
+def test_a_write_chain_records_the_link_that_spent_before_the_final_one(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec 2026-10-13 usage §3.2: a write step's fallback link lands in its attempts."""
+    first = _Agent("opencode", code=3, tokens=TokenUsage(input=300, output=30), cost=0.03)
+    world.agent.edit = _flag
+    world.agent.tokens, world.agent.cost = TokenUsage(input=100, output=10), 0.01
+    agents = {"opencode": first, "codex": world.agent}
+    monkeypatch.setattr(engine, "get_provider", lambda name: agents[name])
+    outcome = world.implement(target="build-pair")
+    assert outcome.exit_code == 0, world.said
+    report = json.loads((outcome.run_dir / "run.json").read_text())
+    (step,) = report["steps"]
+    assert step["provider"] == "codex"
+    assert step["attempts"] == [
+        {
+            "provider": "opencode",
+            "model": "oc-default",
+            "exit_code": 3,
+            "tokens": {"input": 300, "output": 30, "fresh": None, "cached": None, "thinking": None},
+            "cost_usd": 0.03,
+        }
+    ]
+    assert report["tokens"]["input"] == 400
+    assert report["cost_usd"] == pytest.approx(0.04)

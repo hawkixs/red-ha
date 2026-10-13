@@ -20,7 +20,7 @@ from headless_agents.context import resolve_context, role_instructions
 from headless_agents.engine import Overrides, Request, UsageError, execute, plan
 from headless_agents.proofs import CLI_RAILS, proof_path, record_proof
 from headless_agents.registry import Probe
-from headless_agents.result import RunResult
+from headless_agents.result import RunResult, TokenUsage
 from headless_agents.run_record import record, run_id_of
 from headless_agents.runs import Entry, Registry
 from headless_agents.spec import RunSpec
@@ -38,6 +38,8 @@ class _Fake:
     events: str | None = None
     #: The text of a failed run: codex keeps an answer that is not JSON (0.5.3 lot 1).
     failure_text: str | None = None
+    tokens: TokenUsage | None = None
+    cost: float | None = 0.5
     specs: list[RunSpec] = field(default_factory=list)
 
     def run(self, spec: RunSpec) -> RunResult:
@@ -57,12 +59,12 @@ class _Fake:
                 model=spec.model,
                 report_path=spec.report_log,
                 events_log=spec.events_log,
-                tokens=None,
+                tokens=self.tokens,
                 duration_seconds=0.1,
                 tool_call_completed=False,
                 text=self.answer if self.code == 0 else self.failure_text,
                 run_id=run_id_of(spec),
-                cost_usd=0.5,
+                cost_usd=self.cost,
             ),
         )
 
@@ -1123,3 +1125,76 @@ def test_force_on_a_run_outside_any_lineage_is_a_usage_error(world: World) -> No
             force=True,
         )
     assert entry.run_dir.exists()
+
+
+# ── usage (spec 2026-10-13 usage and budget §3.2, §3.3) ─────────────────────
+
+
+def test_an_earlier_link_that_spent_lands_in_attempts_and_the_totals(world: World) -> None:
+    world.roles('[r]\nchain = ["claude:haiku", "codex"]\n')
+    world.fakes["claude"] = _Fake(
+        "claude",
+        code=3,
+        tokens=TokenUsage(input=30004, output=531, fresh=10368, cached=19636, thinking=350),
+        cost=0.0253,
+    )
+    world.fakes["codex"] = _Fake(
+        "codex", tokens=TokenUsage(input=100, output=10, fresh=60, cached=40), cost=None
+    )
+    outcome = world.run("r")
+    assert outcome.exit_code == 0
+    assert outcome.final is not None and outcome.final.provider == "codex"
+    report = json.loads((outcome.run_dir / "run.json").read_text())
+    (step,) = report["steps"]
+    assert (step["provider"], step["exit_code"], step["cost_usd"]) == ("codex", 0, None)
+    assert step["tokens"] == {
+        "input": 100,
+        "output": 10,
+        "fresh": 60,
+        "cached": 40,
+        "thinking": None,
+    }
+    assert step["attempts"] == [
+        {
+            "provider": "claude",
+            "model": "haiku",
+            "exit_code": 3,
+            "tokens": {
+                "input": 30004,
+                "output": 531,
+                "fresh": 10368,
+                "cached": 19636,
+                "thinking": 350,
+            },
+            "cost_usd": 0.0253,
+        }
+    ]
+    assert report["text"] == "the answer"
+    assert report["tokens"] == {
+        "input": 30104,
+        "output": 541,
+        "fresh": 10428,
+        "cached": 19676,
+        "thinking": 350,
+    }
+    assert report["tokens_complete"] is True
+    assert (report["cost_usd"], report["cost_complete"]) == (0.0253, False)
+
+
+def test_a_single_link_run_has_no_attempts(world: World) -> None:
+    outcome = world.run("codex")
+    report = json.loads((outcome.run_dir / "run.json").read_text())
+    assert report["steps"][0]["attempts"] == []
+    assert report["tokens"] is None and report["tokens_complete"] is False
+
+
+def test_one_summary_line_closes_the_run(world: World) -> None:
+    world.fakes["codex"] = _Fake(
+        "codex", tokens=TokenUsage(input=1500, output=20, fresh=500, cached=1000)
+    )
+    outcome = world.run("codex")
+    summaries = [line for line in world.said if line.startswith(f"run {outcome.run_id}:")]
+    assert summaries == [
+        f"run {outcome.run_id}: exit 0, cost 0.5 USD, input 1.5k (cached 1.0k), output 20"
+    ]
+    assert world.said[-1] == summaries[0]

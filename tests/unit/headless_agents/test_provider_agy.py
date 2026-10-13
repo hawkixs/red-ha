@@ -30,7 +30,7 @@ from headless_agents.profile import (
     Workspace,
 )
 from headless_agents.providers import agy
-from headless_agents.result import RunResult
+from headless_agents.result import RunResult, TokenUsage
 from headless_agents.spec import RunSpec
 from headless_agents.structured import SchemaError
 
@@ -1220,3 +1220,86 @@ class TestOutputSchema:
             provider.prepare_home(spec)
         assert not run_dir.exists()
         assert list(root.iterdir()) == []
+
+
+# ── usage (spec 2026-10-13 usage and budget §3.1) ──────────────────────────
+
+USAGE_STREAM = Path(__file__).parent / "fixtures" / "tool_counts" / "agy.events.jsonl"
+RECORDED_USAGE = TokenUsage(input=768506, output=9307, fresh=133605, cached=634901, thinking=5197)
+
+
+def _usage_run(tmp_path: Path, **overrides: object) -> RunResult:
+    real_home = tmp_path / "real-home"
+    (real_home / ".x").mkdir(parents=True, exist_ok=True)
+    (real_home / ".x" / "token").write_text("t", encoding="utf-8")
+    (tmp_path / "runtime").mkdir(exist_ok=True)
+    fields: dict[str, object] = {
+        "prompt": "P",
+        "model": "m",
+        "profile": _profile(tmp_path),
+        "environment": {"PATH": "/usr/bin"},
+        **_logs(tmp_path),
+    }
+    fields.update(overrides)
+    provider = agy.AgyProvider(real_home=real_home, ephemeral_root=tmp_path / "runtime")
+    return provider.run(RunSpec(**fields))  # type: ignore[arg-type]
+
+
+def _stale_events(tmp_path: Path) -> Path:
+    events_log = _logs(tmp_path)["events_log"]
+    events_log.parent.mkdir(parents=True, exist_ok=True)
+    events_log.write_text(USAGE_STREAM.read_text(encoding="utf-8"), encoding="utf-8")
+    return events_log
+
+
+class TestAgyUsage:
+    def test_the_final_result_event_is_measured(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        stream = USAGE_STREAM.read_text(encoding="utf-8")
+        _install(monkeypatch, _FakeProcess(returncode=0, events=stream))
+        result = _usage_run(tmp_path)
+        assert result.exit_code == 0
+        assert result.tokens == RECORDED_USAGE
+        assert result.cost_usd is None
+
+    def test_a_refusal_reads_no_reused_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events_log = _stale_events(tmp_path)
+        captured = _install(monkeypatch, _FakeProcess(returncode=0))
+        result = _usage_run(tmp_path, profile=_profile(tmp_path, guard=None))
+        assert result.exit_code == 1, "no guard: refused as today"
+        assert "command" not in captured
+        assert result.tokens is None
+        assert events_log.read_text(encoding="utf-8") == USAGE_STREAM.read_text(encoding="utf-8")
+
+    def test_a_launch_failure_reads_no_reused_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _stale_events(tmp_path)
+        stream = USAGE_STREAM.read_text(encoding="utf-8")
+
+        def popen(command: list[str], **kwargs: object) -> None:
+            stdout = kwargs["stdout"]
+            stdout.write(stream)  # type: ignore[attr-defined]
+            stdout.flush()  # type: ignore[attr-defined]
+            raise OSError("no such binary")
+
+        monkeypatch.setattr(agy, "guard_denies_machine_tools", lambda path: True)
+        monkeypatch.setattr(agy.subprocess, "Popen", popen)
+        result = _usage_run(tmp_path)
+        assert result.exit_code == PROVIDER_FALLBACK_EXIT_CODE
+        assert result.tokens is None
+
+    def test_an_expired_deadline_reads_no_reused_log(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        events_log = _stale_events(tmp_path)
+        captured = _install(monkeypatch, _FakeProcess(returncode=0))
+        monkeypatch.setattr(agy.time, "monotonic", lambda: 1000.0)
+        result = _usage_run(tmp_path, deadline=999.0)
+        assert result.exit_code == TIMEOUT_EXIT_CODE
+        assert "command" not in captured
+        assert result.tokens is None
+        assert events_log.read_text(encoding="utf-8") == USAGE_STREAM.read_text(encoding="utf-8")
