@@ -1608,4 +1608,7 @@ def test_the_run_epilog_documents_exit_7_for_runs_and_workflows() -> None:
     """Spec 2026-10-13 usage and budget §3.7, A1."""
     help_text = _run_help()
     assert help_text.count("  7 stopped at its budget cap") == 2
-    assert "partial answer on stderr, never stdout; no fallback" in help_text
+    assert (
+        "partial answer on stderr, never stdout (with --json: only\n"
+        "    run.json's partial_answer); no fallback"
+    ) in help_text

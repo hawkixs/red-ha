@@ -581,15 +581,18 @@ reads free, and the two `git worktree add` calls measurably overlap -- before re
   runs its steps one at a time (a review's members take turns, each in its own seat), reads
   opencode's stream every 0.1 s, and once the run's spend reaches a cap kills the step at
   once and exits `7`: status `budget_exhausted`, no fallback link, no later step, member or
-  judge. The spend overshoots by at most the steps that finished within one poll of the
-  crossing, all recorded. What the step wrote so far is a partial answer, never the answer:
-  on stderr after `ha: budget exhausted; partial answer follows (not an answer):`, in the
-  step's `partial_answer`, and under a labelled block in `ha show`; stdout stays empty, and a
-  write's header (run id, branch, diffstat, patch) goes to stderr too. A finished step that
-  reports no cost (under `--max-cost`) or no input tokens (under `--max-input-tokens`) stops
-  the run with exit `1` and `failure_reason: "budget_unmeasured"`. An implement step stopped
-  on its cap commits its residue as any failed step does, and can be continued. Example:
-  `ha run opencode -m opencode-go/glm-5.3-flash --max-input-tokens 2000000 "Review the diff."`.
+  judge. The spend overshoots by at most the model calls (opencode `step_finish` parts) that
+  finished within one poll of the crossing, all recorded. What the step wrote so far is a
+  partial answer, never the answer: on stderr after
+  `ha: budget exhausted; partial answer follows (not an answer):`, in the step's
+  `partial_answer`, and under a labelled block in `ha show`; stdout stays empty, except that
+  with `--json` it carries run.json, whose `partial_answer` holds the text, and stderr has
+  no partial-answer block. A write's header (run id, branch, diffstat, patch) goes to stderr
+  too. A finished step that reports no cost (under `--max-cost`) or no input tokens (under
+  `--max-input-tokens`) stops the run with exit `1` and
+  `failure_reason: "budget_unmeasured"`. An implement step stopped on its cap commits its
+  residue as any failed step does, and can be continued. Example:
+  `ha run opencode -m opencode-go/glm-5.3-flash --max-input-tokens 2000000 "Review it."`.
 
 `TARGET` is a provider (`ha run codex "..."`), a role declared in
 `~/.config/ha/roles.toml` -- an executor: one provider, or a `chain` of them, with optional
@@ -924,21 +927,22 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   that ran before the final link), `partial_answer` (what a step stopped on its budget had
   written, never an answer), `steps_after_crossing`, `started` (`false` for a step never
   started after a budget stop, whose `exit_code` is `null`), `failure_reason`
-  (`budget_exhausted` or `budget_unmeasured`), `usage_complete` and `dir` -- the run-relative path of
-  that step's own directory, `steps/<NN>-<slot>-<role>/`, holding its logs, its `commit.log`
-  for a write step, and its own `result.json` (schema 1, unchanged, no `"kind"`, still
-  `"provider"`): `run.json` is the run's report, `result.json` stays each provider's own
-  contract, unaffected by anything above -- a chained role's own link result lands under
-  `steps/<NN>-<slot>-<role>/links/<index>-<provider>/` and is copied up to the step's
-  `result.json` for the link that answered. Every `ha run` that starts ends with one stderr line,
+  (`budget_exhausted` or `budget_unmeasured`), `usage_complete` and `dir` -- the
+  run-relative path of that step's own directory, `steps/<NN>-<slot>-<role>/`, holding its
+  logs, its `commit.log` for a write step, and its own `result.json` (schema 1, unchanged,
+  no `"kind"`, still `"provider"`): `run.json` is the run's report, `result.json` stays each
+  provider's own contract, unaffected by anything above -- a chained role's own link result
+  lands under `steps/<NN>-<slot>-<role>/links/<index>-<provider>/` and is copied up to the
+  step's `result.json` for the link that answered. Every `ha run` that starts ends with one
+  stderr line,
   `ha: run <id>: exit <code>, cost <usd> USD, input <n> (cached <n>), output <n>`, omitting
   what was not measured and marking incomplete figures `≥ … (incomplete)`; `ha show` prints
-  the same totals as its `total` line. `ha runs` lists runs newest first; `ha clean
-  RUN_ID` removes one (its worktree through git, its branch kept).
-- **Exit codes**: `0` answer, or a review's APPROVE; `1` failure; `2` invalid usage
-  (nothing ran); `3` provider unavailable, chain exhausted; `4` timeout with no tool call
-  started; `5` `--write` finished with no change; `6` a review's CHANGES verdict; `7` the run stopped at its budget cap (partial answer kept apart, no fallback); `124`
-  timeout.
+  the same totals as its `total` line. `ha runs` lists runs newest first; `ha clean RUN_ID`
+  removes one (its worktree through git, its branch kept).
+- **Exit codes**: `0` answer, or a review's APPROVE; `1` failure; `2` invalid usage (nothing
+  ran); `3` provider unavailable, chain exhausted; `4` timeout with no tool call started;
+  `5` `--write` finished with no change; `6` a review's CHANGES verdict; `7` the run stopped
+  at its budget cap (partial answer kept apart, no fallback); `124` timeout.
 
 
 ### Manually lift a lineage or quarantine

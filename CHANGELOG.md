@@ -51,6 +51,18 @@ member rode a brain-v42 tag.
 - `run.json`: the run key `budget`; the step keys `partial_answer`, `steps_after_crossing`,
   `started`, `failure_reason` and `usage_complete`. `budget_exhausted` is a final status of
   the registry and of lineages.
+- `ha show` on a capped run: a `budget` line (spend against each cap, its overshoot, `≥` for
+  a lower bound), a `step` line per step with a budget reason (`not started, <reason>` for
+  a step that never started), each partial answer under a
+  `--- <slot> <role>: partial answer (budget exhausted, not an answer) ---` block, and the
+  status `budget exhausted`.
+- Exit `7` on stderr: the labelled line `ha: budget exhausted; partial answer follows (not
+  an answer):` and the partial answer after it (none with `--json`: run.json's
+  `partial_answer` carries it); a capped write prints its header (run id, branch, diffstat,
+  patch) on stderr, and nothing on stdout.
+- Public names: `budget.cost_cap`, `budget.input_tokens_cap`, `budget.BUDGET_EXHAUSTED`,
+  `budget.BUDGET_UNMEASURED`, `budget.BUDGET_REASONS`, `engine.Request.max_cost` and
+  `engine.Request.max_input_tokens`, `capability.KILL_REAP_SECONDS`.
 
 ### Changed
 

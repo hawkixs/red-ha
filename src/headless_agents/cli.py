@@ -102,7 +102,8 @@ exit codes of a run (a role or a provider):
   4 timeout with no tool call started
   5 write run with no change
   7 stopped at its budget cap (--max-cost, --max-input-tokens, a role's max_cost or
-    max_input_tokens): partial answer on stderr, never stdout; no fallback
+    max_input_tokens): partial answer on stderr, never stdout (with --json: only
+    run.json's partial_answer); no fallback
   124 timeout
   130 interrupted (Ctrl-C); the run reads incomplete
 
