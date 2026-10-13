@@ -25,6 +25,29 @@ deliberately outside the `v*` pattern that names brain-v42's own version; those 
 valid. The earlier `v0.6.0` tag (2026-09-14) also carries 0.1.0; it is the last time the
 member rode a brain-v42 tag.
 
+## Unreleased
+
+### Added
+
+- Usage on every CLI rail that reports it (spec `docs/specs/2026-10-13-usage-and-budget-design.md`,
+  PR1): claude records tokens and cost, codex and agy record tokens (`cost_usd: null`);
+  vibe stays unmeasured. `envelope.extract_claude`, `claude_usage`, `codex_usage` and
+  `agy_usage`; `usage.StreamMark`.
+- `run.json`: `tokens` and `tokens_complete` run totals; each step's `attempts` (the chain
+  links that ran before the final link), counted in the totals and in `cost_usd`.
+- One run summary line on stderr at the end of every `ha run` that starts; a `total` line
+  in `ha show`.
+
+### Changed
+
+- **breaking** for direct `run_claude` and `build_claude_command` callers: claude always
+  runs with `--output-format json` (in the argv even without a schema). Without a schema
+  its stdout envelope lands in `<answer_log|raw_log>.envelope.json`, the answer (the
+  envelope's `result`) in `answer_log` or `<raw_log>.answer.txt`, and `raw_log` holds
+  stderr only; a raw-log-only `ClaudeProvider` run reports `<raw_log>.answer.txt` as
+  `report_path`. An envelope path equal to one of the logs is a `ValueError`.
+  `envelope.unwrap*` results are unchanged.
+
 ## 0.5.5 — 2026-10-13 (tag `v0.5.5` after merge)
 
 ### Added
