@@ -455,9 +455,28 @@ def _plural(count: int, word: str) -> str:
     return f"{count} {word}{'' if count == 1 else 's'}"
 
 
+def _commits_detail(commits: Sequence[Mapping[str, object]]) -> str:
+    """`` (2 recorded commits, 1 hand-written)``: who wrote the range, ``""`` for none."""
+    recorded = sum(1 for c in commits if c.get("run_id") is not None)
+    hand = sum(1 for c in commits if c.get("made_by") == "hand")
+    attributed = sum(1 for c in commits if c.get("made_by") == "unknown")
+    parts = [
+        text
+        for count, text in (
+            (recorded, _plural(recorded, "recorded commit")),
+            (hand, f"{hand} hand-written"),
+            (attributed, f"{attributed} attributed to unconfined writers"),
+        )
+        if count
+    ]
+    return f" ({', '.join(parts)})" if parts else ""
+
+
 def vendors_line(check: Mapping[str, object]) -> str:
     """``vendors authors codex, opencode (2 recorded commits) — reviewers agy, claude:
     independent``: the check a review passed before its reviewers started (§3.8.6)."""
+    if check.get("rule") == "model-vendor":
+        return _model_vendor_line(check)
     raw_commits, raw_authors = check.get("commits"), check.get("authors")
     raw_reviewers = check.get("reviewers")
     commits = (
@@ -472,22 +491,41 @@ def vendors_line(check: Mapping[str, object]) -> str:
             for provider in providers
         }
     )
-    recorded = sum(1 for c in commits if c.get("run_id") is not None)
-    hand = sum(1 for c in commits if c.get("made_by") == "hand")
-    attributed = sum(1 for c in commits if c.get("made_by") == "unknown")
-    parts = [
-        text
-        for count, text in (
-            (recorded, _plural(recorded, "recorded commit")),
-            (hand, f"{hand} hand-written"),
-            (attributed, f"{attributed} attributed to unconfined writers"),
-        )
-        if count
-    ]
-    detail = f" ({', '.join(parts)})" if parts else ""
     return (
-        f"vendors authors {', '.join(authors) or 'none'}{detail} — reviewers "
+        f"vendors authors {', '.join(authors) or 'none'}{_commits_detail(commits)} — reviewers "
         f"{', '.join(reviewers) or 'none'}: independent"
+    )
+
+
+def _model_vendor_line(check: Mapping[str, object]) -> str:
+    raw_commits, raw_authors, raw_panel = (
+        check.get("commits"),
+        check.get("authors"),
+        check.get("panel"),
+    )
+    commits = (
+        [commit for commit in raw_commits if isinstance(commit, dict)]
+        if isinstance(raw_commits, list)
+        else []
+    )
+    authors = [str(author) for author in raw_authors] if isinstance(raw_authors, list) else []
+    panel_parts: list[str] = []
+    if isinstance(raw_panel, list):
+        for member in raw_panel:
+            if not isinstance(member, dict):
+                continue
+            slot, links = member.get("slot"), member.get("links")
+            if not isinstance(slot, str) or not isinstance(links, list):
+                continue
+            for link in links:
+                if not isinstance(link, dict):
+                    continue
+                provider, vendor = link.get("provider"), link.get("vendor")
+                if isinstance(provider, str) and isinstance(vendor, str):
+                    panel_parts.append(f"{slot} {provider} {vendor}")
+    return (
+        f"vendors authors {', '.join(authors) or 'none'}{_commits_detail(commits)} — panel "
+        f"{', '.join(panel_parts) or 'none'}: independent"
     )
 
 

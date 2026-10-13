@@ -872,6 +872,55 @@ def test_the_vendors_line_names_attributed_commits_and_none_authors() -> None:
     )
 
 
+def test_vendors_line_renders_a_model_vendor_check() -> None:
+    check = {
+        "rule": "model-vendor",
+        "table_digest": "sha256:" + "0" * 64,
+        "authors": ["deepseek"],
+        "commits": [
+            {
+                "sha": SHA_1,
+                "run_id": RUN,
+                "made_by": "engine",
+                "providers": ["opencode"],
+                "links": [
+                    {
+                        "provider": "opencode",
+                        "model": "opencode-go/deepseek-v4-pro",
+                        "switches": [],
+                        "vendor": "deepseek",
+                    }
+                ],
+            }
+        ],
+        "panel": [
+            {
+                "slot": "review",
+                "role": "r",
+                "links": [
+                    {
+                        "provider": "opencode",
+                        "model": "anthropic/claude-x",
+                        "switches": [],
+                        "vendor": "anthropic",
+                    }
+                ],
+            },
+            {
+                "slot": "judge",
+                "role": "j",
+                "links": [
+                    {"provider": "agy", "model": "gemini-x", "switches": [], "vendor": "google"}
+                ],
+            },
+        ],
+    }
+    assert show.vendors_line(check) == (
+        "vendors authors deepseek (1 recorded commit) — "
+        "panel review opencode anthropic, judge agy google: independent"
+    )
+
+
 # ── ha show --dir (spec §3.8.6: display only) ───────────────────────────────
 
 

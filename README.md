@@ -674,13 +674,28 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   more) reads a change read-only: `ha run multi-review --run RUN_ID` reviews the current
   tip of an implement run's lineage from its base; `--head REF` and `--base REF` (default
   `origin/HEAD`) name any other range. Before anything runs, the vendor rule proves that no
-  reviewer shares a provider with whoever wrote a commit of the range -- from the
+  reviewer or judge runs a model from the lab that wrote a commit of the range (vendors are
+  resolved from the model, not the provider; see
+  `docs/specs/2026-10-13-model-vendor-rule-design.md`) -- from the
   provenance `ha` records for its own commits -- and refuses the review otherwise (exit
   `2`). The reviewers run in parallel, the judge weighs their findings, and the last line
   of the deciding text is the verdict: exit `0` APPROVE, `6` CHANGES. `ha run build
   --continue RUN_ID --findings REVIEW_ID` then hands those findings to the implementer, on
   the commit the review read; `ha show REVIEW_ID` renders the review, its vendor check
   included, from the state directory, and `ha show --dir PATH` a run directory's report.
+
+  `vendors.toml`, beside `models.toml`, declares exact pairs for models the shipped table
+  cannot name:
+
+  ```toml
+  # vendors.toml, beside models.toml: exact pairs for models the shipped table cannot name
+  [[pair]]
+  provider = "openai-compat"
+  model = "my-model"
+  vendor = "acme"
+  ```
+
+  Vendor names must match `[a-z0-9][a-z0-9-]*` (lowercase lab names).
 
 - **Read-only** (default): a CLI rail reads the current repository through a read-only
   workspace (no write tool; no shell, except codex, whose shell is its only read tool and

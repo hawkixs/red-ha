@@ -29,6 +29,8 @@ member rode a brain-v42 tag.
 
 ### Added
 
+- `vendors.toml` operator configuration for exact model pairs the shipped vendor table
+  cannot name. Vendor names must match `[a-z0-9][a-z0-9-]*` (lowercase lab names).
 - `vibe` CLI rail for Mistral Vibe 2.26.0 (read-only, write and write-with-shell profiles;
   isolation and confinement proofs; no usage data).
   `--effort` sets the Vibe model's `thinking` level, and `ha prove vibe` runs with `low`.
@@ -50,6 +52,13 @@ member rode a brain-v42 tag.
 
 ### Changed
 
+- **Breaking for reviews:** the vendor rule compares the labs of the models run by reviewers
+  and the judge with the labs that wrote commits in the range, instead of comparing provider
+  names. A model the table cannot name, or a `claude`/`codex` link whose environment sets a
+  backend URL, is refused. A refusal names the slot (review or judge), role, provider, model
+  and lab. Reviews of ranges holding commits recorded before this change are refused until
+  those commits leave the range. `vendor_check` documents gain the `model-vendor` shape;
+  legacy documents still read.
 - Every CLI worker ha starts (codex, claude, opencode, agy) now exports `AI_AGENT=<provider>`,
   always replacing a value inherited from the parent session. The ReD rail resolves the
   actor of each gesture from the environment and records `agent:<provider>` for a worker
