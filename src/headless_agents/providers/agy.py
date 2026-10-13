@@ -80,6 +80,7 @@ from ..capability import (
     terminate_process_group,
 )
 from ..context import xml_attribute
+from ..envelope import agy_usage
 from ..event_log import read_events
 from ..guards.agy_workspace import GUARD_CONFIG_NAME
 from ..procgroup import preexec_for, spawn_watched
@@ -96,6 +97,7 @@ from ..sandbox import (
 from ..sandbox import ephemeral_root as default_ephemeral_root
 from ..spec import RunSpec
 from ..structured import refuse_unsupported
+from ..usage import StreamMark
 from ..workspace import (
     argv_prompt_or_refusal,
     armed_run,
@@ -601,6 +603,7 @@ def run_agy(
     deadline: float | None = None,
     temp_prefix: str = "headless-agents-",
     guard_proven: bool = False,
+    launch: StreamMark | None = None,
 ) -> int:
     """Run one agy invocation and return its code (``124`` on deadline, ``3`` if replayable).
 
@@ -619,6 +622,9 @@ def run_agy(
     ``profile.workspace`` runs the agent in that directory under the
     package's own guard instead; ``prompt`` is then expected to carry the
     workspace preamble already (:class:`AgyProvider` builds it).
+
+    ``launch`` receives the ``events_log`` offset at which this invocation's
+    stream starts, set only once the child is launched (spec 2026-10-13 usage §3.1).
     """
     workspace = _confined_workspace(profile, profile.workspace)
     if timeout_seconds <= 0:
@@ -736,6 +742,7 @@ def run_agy(
             events_log.open("w", encoding="utf-8") as events_stream,
             stderr_log.open("w", encoding="utf-8") as stderr_stream,
         ):
+            start_offset = events_stream.tell()
             try:
                 process, lifeline = spawn_watched(
                     command,
@@ -755,6 +762,8 @@ def run_agy(
             except OSError as exc:
                 stderr_stream.write(f"unable to start agy: {exc}\n")
                 return PROVIDER_FALLBACK_EXIT_CODE
+            if launch is not None:
+                launch.offset = start_offset
             try:
                 process.communicate(timeout=remaining)
             except subprocess.TimeoutExpired:
@@ -941,6 +950,7 @@ class AgyProvider:
             )
         start = time.monotonic()
         tripwire = armed_run(workspace)
+        launch = StreamMark()
         exit_code = run_agy(
             prompt=prompt,
             name=spec.name,
@@ -955,8 +965,10 @@ class AgyProvider:
             executable=spec.executable or "agy",
             ephemeral_root=self._ephemeral_root,
             deadline=spec.deadline,
+            launch=launch,
         )
         duration = time.monotonic() - start
+        invocation_events = launch.read(spec.events_log)
         # Belt and braces: agy's own guard already denies writes under .git.
         exit_code, git_tampered = settle_run(tripwire, exit_code, spec.stderr_log)
         return record(
@@ -967,7 +979,9 @@ class AgyProvider:
                 model=spec.model,
                 report_path=spec.report_log,
                 events_log=spec.events_log,
-                tokens=None,
+                # Spec 2026-10-13 usage §3.1: the final result event this invocation
+                # wrote; agy reports no cost (D3).
+                tokens=agy_usage(invocation_events) if invocation_events is not None else None,
                 duration_seconds=duration,
                 tool_call_completed=(
                     spec.profile.mcp is not None and tool_call_completed(spec.events_log)
