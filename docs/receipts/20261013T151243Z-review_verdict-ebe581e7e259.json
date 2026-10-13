@@ -1,0 +1,60 @@
+{
+  "digest": "sha256:ebe581e7e25921de675d1d05dfda61a061673d2c8e5b061123f591118f73ee85",
+  "idempotency_key": "review_verdict:931199ba87b79c9ceff69ef2ddc669ee888d4194:115374596121",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": false,
+      "carry_forwards": {
+        "addressed": [],
+        "deferred": [
+          "CF-4-3"
+        ]
+      },
+      "check_run_id": 115374596121,
+      "diff_truncated": false,
+      "finding_count": 2,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "The description states the project line of uv.lock is updated to 0.5.5 and the test plan claims `uv lock --check` passes, but the visible diff contains no uv.lock hunk (only pyproject.toml, CHANGELOG.md, CLAUDE.md, README.md and the new receipt appear). Question to check: does uv.lock at the head re",
+          "file": "uv.lock",
+          "id": "F-14-1",
+          "line": null,
+          "severity": "important",
+          "status": "new",
+          "title": "Claimed uv.lock version bump not visible in the diff"
+        },
+        {
+          "class": "note",
+          "evidence": "payload.data.findings[0].evidence ends with '...and only matt', an apparent truncation of the recorded #13 finding text. Cosmetic only: the receipt's structure, digest/filename agreement, and timestamp are otherwise well formed.",
+          "file": "docs/receipts/20261013T150714Z-review_verdict-791d75ec341a.json",
+          "id": "F-14-2",
+          "line": 22,
+          "severity": "minor",
+          "status": "new",
+          "title": "Recorded finding evidence truncated mid-word"
+        }
+      ],
+      "independent": true,
+      "mode": "light",
+      "not_reviewed": [],
+      "pr": 14,
+      "providers": [
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "931199ba87b79c9ceff69ef2ddc669ee888d4194",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T15:12:43.951015Z",
+  "schema_version": 1
+}
