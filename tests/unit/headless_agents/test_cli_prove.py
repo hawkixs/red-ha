@@ -253,7 +253,15 @@ def test_prove_stale_leaves_out_a_rail_that_is_not_installed(
     monkeypatch.setattr(cli, "probe", probe_without_agy)
     code, out, _ = world.run("prove", "--stale")
     assert code == 0
-    assert [rail for rail, _ in world.calls] == ["claude", "codex", "codex", "opencode", "opencode", "vibe", "vibe"]
+    assert [rail for rail, _ in world.calls] == [
+        "claude",
+        "codex",
+        "codex",
+        "opencode",
+        "opencode",
+        "vibe",
+        "vibe",
+    ]
     assert "agy" not in out
 
 

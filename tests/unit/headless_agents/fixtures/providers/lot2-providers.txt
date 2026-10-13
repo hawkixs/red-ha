@@ -9,7 +9,7 @@ ok agy            /fake/bin/agy
 ok opencode       /fake/bin/opencode
      1.18.30: isolation missing (no proof recorded); confinement missing (no proof recorded); mode refused
      re-prove: ha prove opencode
-ok vibe            /fake/bin/vibe
+ok vibe           /fake/bin/vibe
      vibe 2.26.0: isolation missing (no proof recorded); confinement missing (no proof recorded); mode refused
      re-prove: ha prove vibe
 -- openrouter     OPENROUTER_API_KEY not set
