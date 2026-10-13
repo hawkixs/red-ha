@@ -1,6 +1,6 @@
 # headless-agents
 
-Run headless CLI agents (`claude -p`, `codex exec`, `agy --print`,
+Run headless CLI agents (`claude -p`, `codex exec`, `agy --print`, `vibe -p`,
 `opencode run`) and OpenAI-compatible HTTP providers under a capability profile the
 caller supplies -- from Python, or from a terminal with the `ha` CLI.
 
@@ -77,8 +77,9 @@ result = CodexProvider().run(spec)
 # 3 failed AND proved no tool call succeeded (safe to replay elsewhere),
 # 4 timed out AND proved no tool call ever started (safe to replay elsewhere,
 #   and the link did not answer for a whole deadline: chain.run_chain names it
-#   in ChainResult.dead_links). claude never returns 4: its OTEL telemetry is
-#   exported on an interval, so an empty log cannot prove an empty run.
+#   in ChainResult.dead_links). claude and vibe never return 4: claude's OTEL
+#   telemetry is exported on an interval, and Vibe emits its stream on completion,
+#   so neither can prove that no tool call ever started.
 ```
 
 The same kind of run through the facade, by provider name, with one directory
@@ -275,9 +276,52 @@ suite; codex's writable row per spec decision 13, measured live 2026-09-24):
 | claude | `--restricted --tools Read,Glob,Grep --permission-mode dontAsk`, cwd `<path>` | `--restricted --tools Read,Edit,Write,Glob,Grep --permission-mode acceptEdits` | `Bash`, unconfined by `--restricted` -- operator's user rights |
 | opencode | allow `read`/`glob`/`grep`/`list`; `external_directory` denied; `--dir <path>` | also allow `edit`/`write` | allow `bash`, unconfined -- operator's user rights |
 | agy | package-owned **workspace guard**, reads confined to `<path>`, every write and `run_command` denied | the same guard, writes confined to `<path>` | `run_command` allowed, unconfined -- operator's user rights |
+| vibe | enable `read_file` only (Vibe 2.26.0 has no grep tool) | enable `read_file`, `write_file` and `edit` | add `bash`, unconfined -- `--shell` writes are serialised |
+
+### Vibe (Mistral)
+
+The `vibe` rail supports Mistral Vibe **2.26.0** only. Install that version with
+`uv tool install mistral-vibe==2.26.0`; ha never updates Vibe, so after upgrading with
+`uv tool upgrade mistral-vibe`, run `ha prove vibe` to re-establish its proofs.
+
+Configure the API key as the `mistral` entry in `keys.toml` or as `MISTRAL_API_KEY`.
+The model is mandatory: `ha run vibe -m mistral-large-4 ...`. `mistral-large-4` is the
+recommended Large 4 reasoning model, measured on 2026-10-13; `mistral-large-latest` is an
+alias of `mistral-large-2512` (Large 3), not Large 4.
+`ha prove vibe`, `ha prove --stale` and `ha providers --update` need `vibe = "<model>"`
+in `models.toml`, for example `mistral-large-4`.
+`--effort` (or a role's `effort`) becomes the model's `thinking` level in Vibe's per-run
+config: `none`, `minimal` and `low` give `low`; `medium` gives `medium`; `high` gives
+`high`; `xhigh`, `max` and `ultra` give `max`. Vibe 2.26.0 sends Mistral no reasoning for
+`low` and full reasoning for every other level. Measured on 2026-10-13 with Large 4:
+`--effort low` ran the confinement probe in 13 to 18 s, while Large 4's own default
+reasoned for up to 279 s before its first tool call.
+
+| Profile | Enabled Vibe tools |
+|---|---|
+| No workspace / read-only | `read_file` only (Vibe 2.26.0 has no grep tool) |
+| Write | `read_file`, `write_file`, `edit` |
+| Write with shell | `read_file`, `write_file`, `edit`, `bash` |
+
+Vibe reports no usage, cost or model. Its final answer is not evidence that an effect
+occurred. Code-mode meta-tools (`run_typescript`, `search_tool_functions`) cannot be
+disabled, but pass through the same capability gate. The shell is unconfined; `--shell`
+writes are therefore serialised. SIGINT exits 0, so ha never sends SIGINT: it sends
+SIGTERM to the process group, then SIGKILL after the grace period. Every Vibe deadline
+returns 124, never 4, so a timed-out Vibe link stops a fallback chain; put Vibe last if
+the chain must advance.
+
+Vibe's gate stops paths outside the workspace, but not `.git` inside it: `write_file` and
+`edit` can write `<ws>/.git/config` or a hook. The `.git` tripwire (below) catches that
+after the run, as on claude and opencode.
+
+MCP is unsupported in v1; ha refuses a run configured with an MCP server (exit 2).
+Versions other than 2.26.0 and Vibe API error shapes beyond the two recorded are
+unverified.
 
 What a workspace run sees of the operator's HOME, rail by rail:
-- **agy and opencode**: an ephemeral HOME, in every case.
+- **agy, opencode and vibe**: an ephemeral HOME, in every case. For Vibe, ha writes
+  `VIBE_HOME`; the operator's `~/.vibe` is never read.
 - **codex**: an ephemeral `CODEX_HOME` (see below); the process `HOME` is the caller's.
 - **claude**: the caller's HOME; `--restricted` ignores the settings sources. Whether
   `~/.claude/CLAUDE.md` still loads under `--restricted` is UNMEASURED.
@@ -292,8 +336,8 @@ What a workspace run sees of the operator's HOME, rail by rail:
 - **opencode's `read` follows an inside symlink to an outside target.** The tool confines
   the starting path, not where it leads (`ws/link.txt -> outside/secret.txt` reads the
   outside content) -- measured live, `test_opencode_symlink_residual`.
-- **The shell is unconfined on claude, opencode and agy.** With `shell=True`, the shell
-  itself runs with the operator's own rights on all three; only codex's shell runs inside
+- **The shell is unconfined on claude, opencode, agy and vibe.** With `shell=True`, the shell
+  itself runs with the operator's own rights on all four; only codex's shell runs inside
   its OS sandbox. Off by default, and the caller's to accept when arming it.
 - **A write run can change `<ws>/.git` on claude, opencode and codex.** Hooks and config
   written there run later, outside any sandbox, when git runs in that checkout (whether
@@ -687,6 +731,19 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   claude = "sonnet"
   opencode = "opencode-go/glm-5.3-flash"
   mistral = "mistral-small-latest"
+  vibe = "mistral-large-4"
+  ```
+
+  Add Vibe models to the operator's catalogue as needed, for example:
+
+  ```toml
+  [vibe."mistral-large-4"]
+  purpose = "Recommended Large 4 reasoning model."
+  tasks = [{kind = "code-review"}, {kind = "build"}]
+  cost = {kind = "per_token"}
+  pitfalls = ["Vibe reports no usage, cost or model."]
+  verified_at = 2026-10-13
+  source = "Mistral Vibe 2.26.0 measured 2026-10-13"
   ```
 - **Model catalogue and live drift** (`ha models [--provider NAME] [--json] [--refresh]`):
   the catalogue is the operator's own file, never ha's -- `~/.config/ha/catalog.toml`, or
@@ -714,14 +771,15 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   ```
 
   A top-level key is either `schema` (the integer `1`, required) or a provider table named
-  after one of the eight rails; any other table-valued key is an unknown-provider error,
+  after one of the nine rails; any other table-valued key is an unknown-provider error,
   and any non-table top-level value is a warning (named, and ignored) whether or not its
   name matches a provider. Inside a model table, an unknown field in the model, in a
   `tasks` entry or in `cost` is likewise a warning naming the key; every other departure
   (a missing field, a wrong type, a value outside a closed list, a duplicate task kind, a
   model value that is not a table) is an error naming the key. `tasks[].effort` follows a
-  per-provider rule: optional for `codex` and for `opencode` (whose value becomes its own
-  `--variant`), and in both cases one of `none`, `minimal`, `low`, `medium`, `high`,
+  per-provider rule: optional for `codex`, for `opencode` (whose value becomes its own
+  `--variant`) and for `vibe` (whose value becomes its model's `thinking` level), and in
+  every case one of `none`, `minimal`, `low`, `medium`, `high`,
   `xhigh`, `max`, `ultra` -- ha performs no model-specific check beyond that closed list;
   forbidden for `agy`, `claude`,
   `openrouter`, `mistral`, `nvidia` and `openai-compat`, an error even when the value would
@@ -731,8 +789,8 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   the provider has one (`opencode models`, `agy models`, and OpenRouter's own
   `GET /api/v1/models` with the key `keys.toml` or the environment names); `roles.toml`'s
   declared links; and `models.toml`'s defaults. Only `opencode`, `agy` and `openrouter`
-  have a live list; the other five rails (`claude`, `codex`, `mistral`, `nvidia`,
-  `openai-compat`) are always reported `catalogue-only` -- this reflects which providers
+  have a live list; the other six rails (`claude`, `codex`, `mistral`, `nvidia`,
+  `openai-compat`, `vibe`) are always reported `catalogue-only` -- this reflects which providers
   publish one, never a claim that the others have no models. A live query that times out
   or answers unreadable garbage is reported `unavailable`/`unreadable`, never fatal, and
   never turns into a claim that a catalogued model has disappeared: that judgement is

@@ -1,6 +1,6 @@
 """What every rail does once its process has exited: read the answer, record the run.
 
-Shared by the four CLI rails so that ``RunResult.text`` means the same thing
+Shared by the five CLI rails so that ``RunResult.text`` means the same thing
 on each of them, and so that ``result.json`` is written in one place.
 """
 

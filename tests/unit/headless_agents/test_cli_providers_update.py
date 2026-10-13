@@ -29,6 +29,7 @@ VERSIONS = {
     "codex": "codex-cli 0.156.0",
     "agy": "1.2.12",
     "opencode": "1.18.30",
+    "vibe": "vibe 2.26.0",
 }
 
 
@@ -164,7 +165,7 @@ def test_update_hands_the_selection_and_the_flags_through(world: _World) -> None
     code, _, _ = world.run("providers", "--update", "--no-prove")
     assert code == 0
     (call,) = world.calls
-    assert call["rails"] == ["claude", "codex", "agy", "opencode"]
+    assert call["rails"] == ["claude", "codex", "agy", "opencode", "vibe"]
     assert call["prove_after"] is False and call["wait"].seconds is None
 
 
@@ -178,11 +179,50 @@ def test_update_check_prints_unknown_per_rail_and_exits_0(
     code, out, _ = world.run("providers", "--update", "--check")
     assert code == 0
     lines = out.splitlines()
-    assert [line.split(":", 1)[0] for line in lines] == ["claude", "codex", "agy", "opencode"]
-    assert all("update available: unknown (no vendor dry run)" in line for line in lines)
+    assert [line.split(":", 1)[0] for line in lines] == [
+        "claude",
+        "codex",
+        "agy",
+        "opencode",
+        "vibe",
+    ]
+    assert all("update available: unknown (no vendor dry run)" in line for line in lines[:4])
     assert "updater: /fake/bin/opencode upgrade" in lines[3]
     assert "rollback: opencode upgrade 1.18.30" in lines[3]
+    assert "ha does not update vibe" in lines[4] and "uv tool upgrade mistral-vibe" in lines[4]
     assert not (world.state / "updates").exists(), "an updater ran"
+
+
+def test_update_vibe_needs_no_model_and_reports_manual_command(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.undo()
+    monkeypatch.setattr(cli, "probe", _fake_probe)
+    monkeypatch.setattr(updaters, "probe", _fake_probe)
+    (world.home / ".config" / "ha" / "models.toml").unlink()
+    code, out, err = world.run("providers", "--update", "vibe")
+    assert code == 0, err
+    assert "vibe" in out and "not updated" in out
+    assert "uv tool upgrade mistral-vibe" in out and "ha prove vibe" in out
+    assert not (world.state / "updates").exists(), "an updater ran"
+
+
+def test_update_all_needs_no_model_for_vibe(world: _World) -> None:
+    (world.home / ".config" / "ha" / "models.toml").write_text(
+        'claude = "m-claude"\ncodex = "m-codex"\nagy = "m-agy"\nopencode = "m-opencode"\n'
+    )
+    world.rows = [
+        _row(rail, status="unchanged", new_version="1.0.0")
+        for rail in ("claude", "codex", "agy", "opencode")
+    ] + [_row("vibe", status="not updated", new_version="2.26.0", note="manual")]
+    code, _, err = world.run("providers", "--update")
+    assert code == 0, err
+
+
+def test_update_all_still_fails_for_an_agy_not_updated_row(world: _World) -> None:
+    world.rows = [_row("agy", status="not updated", new_version="1.2.12", exit_code=None, log=None)]
+    code, _, _ = world.run("providers", "--update")
+    assert code == 1
 
 
 # ── the report and the exit code ─────────────────────────────────────────────

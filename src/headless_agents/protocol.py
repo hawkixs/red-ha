@@ -1,7 +1,7 @@
 """``AgentProvider`` -- the common protocol implemented by the adapters.
 
 Structural (``typing.Protocol``), not a base class: ``providers/codex.py``,
-``providers/agy.py`` and ``providers/claude.py`` each expose a class that
+``providers/agy.py``, ``providers/claude.py`` and ``providers/vibe.py`` each expose a class that
 satisfies this shape. The protocol is the seam a consumer can code against
 without caring which rail answers.
 

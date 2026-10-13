@@ -59,9 +59,11 @@ class Updater:
     rail: str
     #: Appended to the executable path the probe measured -- never to a bare name.
     args: tuple[str, ...]
-    #: A vendor dry run; ``None`` for all four today (measured): ``--check`` then
+    #: A vendor dry run; ``None`` for all five today (measured): ``--check`` then
     #: reports ``unknown``. A vendor that gains one is a one-line change here.
     check_args: tuple[str, ...] | None
+    #: The operator's own command when ha never updates the rail itself.
+    manual: str | None = None
 
 
 UPDATERS: Final[Mapping[str, Updater]] = {
@@ -69,6 +71,7 @@ UPDATERS: Final[Mapping[str, Updater]] = {
     "codex": Updater("codex", ("update",), None),
     "agy": Updater("agy", ("update",), None),
     "opencode": Updater("opencode", ("upgrade",), None),
+    "vibe": Updater("vibe", (), None, manual="uv tool upgrade mistral-vibe"),
 }
 
 #: An updater downloads a release: ten minutes, then its whole process group is killed.
@@ -116,6 +119,8 @@ def rollback(
         return (copy if copy.is_file() else None), None
     if rail == "opencode":
         return None, f"opencode upgrade {version}"
+    if rail == "vibe":
+        return None, f"uv tool install mistral-vibe=={version}"
     return None, None
 
 
@@ -288,6 +293,19 @@ def _update_one(
             note=f"not installed: {before.detail}",
             ran=False,
         )
+    manual = UPDATERS[rail].manual
+    if manual is not None:
+        return _Attempt(
+            rail=rail,
+            status="not updated",
+            old_version=before.version,
+            new_version=before.version,
+            updater=(),
+            exit_code=None,
+            log=None,
+            note=f"not updated: ha does not update {rail}; run `{manual}`, then `ha prove {rail}`",
+            ran=False,
+        )
     argv = (before.detail, *UPDATERS[rail].args)
     if rail == "agy":
         refusal = _copy_agy_aside(before.detail, before.version, state)
@@ -443,14 +461,21 @@ def run_updates(
                     status="checked" if found.available else "not installed",
                     old_version=version,
                     new_version=None,
-                    updater=(found.detail, *UPDATERS[rail].args) if found.available else (),
+                    updater=(found.detail, *UPDATERS[rail].args)
+                    if found.available and UPDATERS[rail].manual is None
+                    else (),
                     exit_code=None,
                     log=None,
                     verdicts=(),
                     mode=proof_state.rail_state(state, rail, version).mode,
                     rollback_path=path,
                     rollback_command=command,
-                    note="update available: unknown (no vendor dry run)"
+                    note=(
+                        f"not updated: ha does not update {rail}; run `{UPDATERS[rail].manual}`, "
+                        f"then `ha prove {rail}`"
+                        if found.available and UPDATERS[rail].manual is not None
+                        else "update available: unknown (no vendor dry run)"
+                    )
                     if found.available
                     else f"not installed: {found.detail}",
                 )

@@ -38,6 +38,7 @@ from .config_paths import ConfigPathError, config_file, state_dir
 from .context import ContextBundle, ContextLevel, resolve_context, role_instructions
 from .locks import LockTimeout, Rank, held
 from .mcp_profiles import PROFILES_FILE_NAME, McpProfileError, load_profiles, mcp_server
+from .model_catalog import EFFORT_OPTIONAL_PROVIDERS
 from .profile import CapabilityProfile, Credentials, McpServer, Workspace, mcp_no_proxy_hosts
 from .proofs import CLI_RAILS, confinement, isolation_label, isolation_ok
 from .providers.claude import MAX_APPEND_SYSTEM_PROMPT_BYTES
@@ -758,6 +759,7 @@ DEFAULT_CREDENTIALS: Final[Mapping[str, tuple[str, ...]]] = {
         ".gemini/antigravity-cli/antigravity-oauth-token",
     ),
     "opencode": (".local/share/opencode/auth.json",),
+    "vibe": (),
 }
 
 #: opencode is not on PATH by default; its installer puts it here.
@@ -891,7 +893,7 @@ def _configuration_line(index: int, slot: str, plan: Plan, provider: str, spec: 
         if "timeout" in role.declared
         else "default"
     )
-    effort_note = "" if provider in {"codex", "opencode"} else f" (not used by {provider})"
+    effort_note = "" if provider in EFFORT_OPTIONAL_PROVIDERS else f" (not used by {provider})"
     model = spec.model or "(auto)"
     return (
         f"step {index} {slot} {role.name}: {provider}/{model} ({source}), "
@@ -1078,7 +1080,7 @@ def _admit(
 #: Rails whose shell runs outside any sandbox of theirs: a ``shell`` write role
 #: on one of them is unconfined whatever its proofs say (decision 13; codex
 #: keeps its sandboxed shell).
-_UNSANDBOXED_SHELL_RAILS: Final = frozenset({"claude", "opencode", "agy"})
+_UNSANDBOXED_SHELL_RAILS: Final = frozenset({"claude", "opencode", "agy", "vibe"})
 
 
 def write_is_unconfined(plan: Plan) -> bool:

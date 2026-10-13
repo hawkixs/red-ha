@@ -23,6 +23,7 @@ import pytest
 
 from headless_agents import locks, proofs, prove, updaters
 from headless_agents.engine import UsageError
+from headless_agents.registry import Probe
 
 
 def test_every_cli_rail_declares_its_measured_updater() -> None:
@@ -32,7 +33,10 @@ def test_every_cli_rail_declares_its_measured_updater() -> None:
         "codex": ("codex", ("update",), None),
         "agy": ("agy", ("update",), None),
         "opencode": ("opencode", ("upgrade",), None),
+        "vibe": ("vibe", (), None),
     }
+    assert updaters.UPDATERS["vibe"].manual == "uv tool upgrade mistral-vibe"
+    assert all(u.manual is None for rail, u in updaters.UPDATERS.items() if rail != "vibe")
     assert set(updaters.UPDATERS) == set(proofs.CLI_RAILS)
     assert updaters.UPDATE_TIMEOUT_SECONDS == 600.0
 
@@ -74,6 +78,10 @@ def test_rollback_names_only_a_path_that_exists(tmp_path: Path) -> None:
         None,
         "opencode upgrade 1.18.30",
     )
+    assert updaters.rollback("vibe", "vibe 2.26.0", home, state) == (
+        None,
+        "uv tool install mistral-vibe==2.26.0",
+    )
 
     claude = home / ".local/share/claude/versions/2.1.283"
     claude.parent.mkdir(parents=True)
@@ -102,10 +110,37 @@ def test_rollback_names_only_a_path_that_exists(tmp_path: Path) -> None:
     assert updaters.rollback("agy", "1.2.11", home, state) == (agy, None)
 
 
-@pytest.mark.parametrize("rail", ["claude", "codex", "agy", "opencode"])
+def test_vibe_rollback_is_a_uv_command(tmp_path: Path) -> None:
+    assert updaters.rollback("vibe", "vibe 2.26.0", tmp_path, tmp_path) == (
+        None,
+        "uv tool install mistral-vibe==2.26.0",
+    )
+
+
+@pytest.mark.parametrize("rail", ["claude", "codex", "agy", "opencode", "vibe"])
 def test_an_unparsable_version_has_no_rollback(tmp_path: Path, rail: str) -> None:
     assert updaters.rollback(rail, "garbage", tmp_path, tmp_path) == (None, None)
     assert updaters.rollback(rail, None, tmp_path, tmp_path) == (None, None)
+
+
+def test_vibe_is_never_updated_by_ha(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        updaters,
+        "_probe",
+        lambda rail, home, environ: Probe(available=True, detail="/x/vibe", version="vibe 2.26.0"),
+    )
+    attempt = updaters._update_one(
+        "vibe",
+        logs=tmp_path / "logs",
+        state=tmp_path,
+        home=tmp_path,
+        environ={},
+        say=lambda _: None,
+    )
+    assert attempt.status == "not updated" and not attempt.ran
+    assert "uv tool upgrade mistral-vibe" in (attempt.note or "")
+    assert "ha prove vibe" in (attempt.note or "")
+    assert not (tmp_path / "logs").exists()
 
 
 def test_updaters_never_record_a_proof() -> None:

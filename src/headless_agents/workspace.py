@@ -1,4 +1,4 @@
-"""What the four CLI rails share once a run carries a workspace or a context bundle."""
+"""What the five CLI rails share once a run carries a workspace or a context bundle."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def settle_run(
 def rail_preamble(spec: RunSpec, *, tools_note: str) -> str:
     """The workspace note, then the bundle's preamble -- repository content
     included in EVERY mode: the preamble is the only channel that reaches all
-    four rails (see :mod:`headless_agents.context`)."""
+    five rails (see :mod:`headless_agents.context`)."""
     workspace = workspace_of(spec)
     parts: list[str] = []
     if workspace is not None:

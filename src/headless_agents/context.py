@@ -9,10 +9,10 @@ them through ONE channel, the preamble, in every mode and on every rail.
 
 A second channel -- an instruction file written into a write-mode workspace
 for the rail to read natively -- was measured live on 2026-09-23 and failed
-on three rails out of four: claude's ``--restricted`` does not auto-load the
-workspace ``CLAUDE.md``, opencode's ``OPENCODE_DISABLE_PROJECT_CONFIG`` (kept
-for isolation) also disables ``AGENTS.md``, and agy reads ``AGENTS.md`` only
-inside a repository checkout. It was removed: nothing is written into a
+on three rails out of four (vibe, added later, was not measured): claude's
+``--restricted`` does not auto-load the workspace ``CLAUDE.md``, opencode's
+``OPENCODE_DISABLE_PROJECT_CONFIG`` (kept for isolation) also disables
+``AGENTS.md``, and agy reads ``AGENTS.md`` only inside a repository checkout. It was removed: nothing is written into a
 workspace.
 """
 

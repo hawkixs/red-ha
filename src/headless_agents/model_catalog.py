@@ -74,7 +74,7 @@ TASK_KINDS = frozenset(
 EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 #: Providers whose ``tasks[].effort`` is optional (codex) or accepted as-is
 #: for opencode's own ``--variant``; every other provider forbids the field.
-EFFORT_OPTIONAL_PROVIDERS = frozenset({"codex", "opencode"})
+EFFORT_OPTIONAL_PROVIDERS = frozenset({"codex", "opencode", "vibe"})
 COST_KINDS = frozenset({"subscription", "per_token", "window"})
 WINDOWS = frozenset({"5h", "daily", "weekly", "monthly"})
 

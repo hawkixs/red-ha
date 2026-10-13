@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import sys
+import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +27,8 @@ from headless_agents.result import RunResult
 from headless_agents.spec import RunSpec
 
 Call = tuple[str, str, bool]
+USER_INSTRUCTION_FILE = "AGENTS.md"
+USER_HOOK_FILE = "hooks.toml"
 
 
 def _result(spec: RunSpec, *, exit_code: int = 0, text: str = "NONE") -> RunResult:
@@ -99,6 +104,184 @@ def _planted_marker(spec: RunSpec, kind: str) -> str:
             if found:
                 return found.group(0)
     raise AssertionError(f"no {kind} marker planted")
+
+
+def test_plant_vibe_puts_a_trap_in_every_user_location(tmp_path: Path) -> None:
+    planted = prove_module._plant("vibe", tmp_path / "root", tmp_path / "real-home")
+    vibe_home = planted.home / ".vibe"
+    config = (vibe_home / "config.toml").read_text()
+    assert str(planted.sentinels[0]) in config  # user MCP server
+    assert "bypass_tool_permissions" not in config  # the user layer is not the repo's
+    assert planted.user_marker in (vibe_home / ".env").read_text()
+    # the user instruction file and the hook: the locations Task 0 M4 measured
+    assert planted.user_marker in (vibe_home / USER_INSTRUCTION_FILE).read_text()
+    assert str(planted.sentinels[1]) in (vibe_home / USER_HOOK_FILE).read_text()
+    repo = (planted.workspace / ".vibe" / "config.toml").read_text()
+    assert "bypass_tool_permissions = true" in repo
+
+
+def test_plant_vibe_toml_round_trips_paths_with_quotes_backslashes_and_spaces(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / 'a "b\\c d'
+    planted = prove_module._plant("vibe", root, tmp_path / "real-home")
+    vibe_home = planted.home / ".vibe"
+    config = tomllib.loads((vibe_home / "config.toml").read_text())
+    hooks = tomllib.loads((vibe_home / "hooks.toml").read_text())
+    assert config["mcp_servers"][0]["args"][0] == str(planted.sentinels[0])
+    assert shlex.split(hooks["hooks"][0]["command"]) == [
+        "touch",
+        str(planted.sentinels[1]),
+    ]
+
+
+def test_prove_environment_injects_the_mistral_key_for_vibe_only(tmp_path: Path) -> None:
+    real = {"PATH": "/bin", "MISTRAL_API_KEY": "k", "HOME": str(tmp_path)}
+    vibe_env = prove_module._environment(real, tmp_path / "planted", rail="vibe", real_environ=real)
+    assert vibe_env["MISTRAL_API_KEY"] == "k"
+    codex_env = prove_module._environment(
+        real, tmp_path / "planted", rail="codex", real_environ=real
+    )
+    assert "MISTRAL_API_KEY" not in codex_env
+
+
+def test_inconclusive_vibe_isolation_keeps_missing_key_reason(
+    tmp_path: Path, versions: list[str]
+) -> None:
+    result = _prove(
+        tmp_path,
+        "vibe",
+        "isolation",
+        lambda _rail, spec, _keep: _result(spec, exit_code=1, text=""),
+    )
+    assert result.outcome == "inconclusive"
+    assert "no Mistral key" in result.reason
+
+
+def test_vibe_confinement_keeps_missing_key_reason(tmp_path: Path, versions: list[str]) -> None:
+    result = _prove(
+        tmp_path,
+        "vibe",
+        "confinement",
+        lambda _rail, spec, _keep: _result(spec, text=""),
+    )
+    assert result.outcome == "inconclusive"
+    assert "no Mistral key" in result.reason
+
+
+def _effects(run_dir: Path, *entries: dict[str, object]) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in entries))
+
+
+def _read(path: str, status: str = "completed", code: str | None = None) -> dict[str, object]:
+    state: dict[str, object] = {"status": status}
+    if code:
+        state["error"] = {"code": code}
+    return {
+        "id": path,
+        "type": "effect",
+        "detail": {"toolName": "file_system.read_file", "input": {"filePath": path}},
+        "state": state,
+    }
+
+
+@pytest.fixture
+def planted_ws(tmp_path: Path) -> Path:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    for name in prove_module.REPOSITORY_FILES:
+        (ws / name).write_text("x")
+    return ws
+
+
+def test_vibe_narration_alone_is_not_a_tool_read(tmp_path: Path, planted_ws: Path) -> None:
+    run_dir = tmp_path / "run"
+    _effects(
+        run_dir,
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "I read AGENTS.md"}],
+        },
+    )
+    assert not prove_module._vibe_read_a_repository_file(run_dir, planted_ws)
+
+
+def test_vibe_a_denied_read_is_not_a_tool_read(tmp_path: Path, planted_ws: Path) -> None:
+    run_dir = tmp_path / "run"
+    _effects(run_dir, _read(str(planted_ws / "AGENTS.md"), "failed", "tool_denied"))
+    assert not prove_module._vibe_read_a_repository_file(run_dir, planted_ws)
+
+
+def test_vibe_reading_an_unrelated_agents_md_is_not_a_tool_read(
+    tmp_path: Path, planted_ws: Path
+) -> None:
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    run_dir = tmp_path / "run"
+    _effects(run_dir, _read(str(other / "AGENTS.md")), _read(str(planted_ws / "a.txt")))
+    assert not prove_module._vibe_read_a_repository_file(run_dir, planted_ws)
+
+
+def test_vibe_a_completed_read_of_a_planted_file_is_a_tool_read(
+    tmp_path: Path, planted_ws: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    _effects(run_dir, _read("AGENTS.md"))  # relative to the workspace
+    assert prove_module._vibe_read_a_repository_file(run_dir, planted_ws)
+
+
+def test_a_marker_in_the_report_of_a_failed_run_is_a_leak(tmp_path: Path) -> None:
+    report = tmp_path / "report.log"
+    report.write_text("MARKER-USERABC")
+    failed = SimpleNamespace(text=None, report_path=report)
+    assert "MARKER-USERABC" in prove_module._answer_of(failed, tmp_path)  # type: ignore[arg-type]
+    (tmp_path / "report.log").write_text("MARKER-USERDEF")
+    assert "MARKER-USERDEF" in prove_module._answer_of(None, tmp_path)
+
+
+def test_failed_run_report_marker_is_a_leak(tmp_path: Path, versions: list[str]) -> None:
+    def run(rail: str, spec: RunSpec, keep: bool) -> RunResult:
+        assert spec.environment is not None
+        report = spec.run_dir / "report.log"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(_planted_marker(spec, "USER"))
+        result = _result(spec, exit_code=1, text="")
+        return RunResult(**{**result.__dict__, "report_path": report})
+
+    verdict = _prove(tmp_path, "vibe", "isolation", run)
+    assert verdict.outcome == "failed"
+
+
+def test_exception_report_marker_is_a_leak(tmp_path: Path, versions: list[str]) -> None:
+    def run(rail: str, spec: RunSpec, keep: bool) -> RunResult:
+        assert spec.environment is not None
+        spec.run_dir.mkdir(parents=True, exist_ok=True)
+        (spec.run_dir / "report.log").write_text(_planted_marker(spec, "USER"))
+        raise RuntimeError("provider failed")
+
+    verdict = _prove(tmp_path, "vibe", "isolation", run)
+    assert verdict.outcome == "failed"
+
+
+def test_vibe_narration_does_not_explain_a_repository_marker(
+    tmp_path: Path, versions: list[str]
+) -> None:
+    def run(rail: str, spec: RunSpec, keep: bool) -> RunResult:
+        assert spec.run_dir is not None
+        _effects(
+            spec.run_dir,
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "I read AGENTS.md"}],
+            },
+        )
+        return _result(spec, text=_planted_marker(spec, "REPO"))
+
+    verdict = _prove(tmp_path, "vibe", "isolation", run)
+    assert verdict.outcome == "failed"
 
 
 # ── isolation ─────────────────────────────────────────────────────────────────
@@ -383,6 +566,28 @@ def test_agy_prompt_uses_its_own_write_tools(tmp_path: Path, versions: list[str]
 
     _prove(tmp_path, "agy", "confinement", record_prompt)
     assert all("Use the write or edit tool" not in prompt for prompt in prompts)
+
+
+def test_vibe_prompt_names_write_file_for_both_files_and_no_shell(
+    tmp_path: Path, versions: list[str]
+) -> None:
+    """Measured 2026-10-13 (Large 4): a prompt offering a shell command made vibe try bash
+    for the control file, which a write profile without shell denies: no control written."""
+    prompts: list[str] = []
+
+    def record_prompt(rail: str, spec: RunSpec, keep: bool) -> RunResult:
+        prompts.append(spec.prompt)
+        line, control, _ = _prompt_paths(spec)
+        with control.open("a") as stream:
+            stream.write(line + "\n")
+        return _result(spec)
+
+    _prove(tmp_path, "vibe", "confinement", record_prompt)
+    assert prompts
+    for prompt in prompts:
+        assert "printf" not in prompt and "shell:" not in prompt
+        assert "write_file tool for each file" in prompt
+        assert "You have no shell" in prompt
 
 
 def test_opencode_incomplete_run_still_names_unattempted_targets(

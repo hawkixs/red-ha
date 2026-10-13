@@ -443,7 +443,7 @@ def _providers(args: argparse.Namespace, io: Io) -> int:
                 io.stdout.write(f"     re-prove: {row['reprove']}\n")
     io.stdout.write(
         "mode is for a write role without --shell; a --shell write on claude, "
-        "opencode or agy is always serialised\n"
+        "opencode, agy or vibe is always serialised\n"
     )
     return 0
 
@@ -668,7 +668,8 @@ def _providers_update(args: argparse.Namespace, io: Io) -> int:
     prove_after = not args.check and not args.no_prove
     # A rail updated without a model to prove it with would stay refused: known now,
     # before any updater runs.
-    models = _prove_models(rails, io) if prove_after else {}
+    to_prove = [rail for rail in rails if updaters.UPDATERS[rail].manual is None]
+    models = _prove_models(to_prove, io) if prove_after else {}
     rows = updaters.run_updates(
         rails,
         state=state_dir(io.environ, home=io.home),
@@ -688,6 +689,8 @@ def _providers_update(args: argparse.Namespace, io: Io) -> int:
             io.stdout.write(_update_line(row) + "\n")
 
     def _unsettled(row: updaters.UpdateRow) -> bool:
+        if row.status == "not updated" and updaters.UPDATERS[row.rail].manual is not None:
+            return False
         if row.status in ("failed", "timed out", "not updated"):
             return True
         changed = row.new_version is not None and row.new_version != row.old_version

@@ -176,7 +176,7 @@ class Workspace(BaseModel):
     ``path`` by each rail's own mechanism (see the rails' docstrings for what
     was measured to hold, and the residuals: codex reads outside by design,
     opencode follows an inside symlink). ``shell`` is refused without
-    ``write``: on three rails out of four a shell can write whatever the read
+    ``write``: on four rails out of five a shell can write whatever the read
     tools cannot, and only codex confines it.
     """
 

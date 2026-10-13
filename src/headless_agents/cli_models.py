@@ -1,6 +1,6 @@
 """Which model each ``ha run`` link gets.
 
-The rails never pick a model for the caller -- claude, codex and opencode
+The rails never pick a model for the caller -- claude, codex, opencode and vibe
 refuse an empty one (opencode's own default can be a contributor model its
 vendor trains on), only agy chooses safely. The e2e run of 2026-09-24 found
 the CLI handing them ``-m ""`` whenever ``-m`` was omitted, and one ``-m``
