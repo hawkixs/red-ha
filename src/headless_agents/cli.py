@@ -967,13 +967,15 @@ def _run(args: argparse.Namespace, io: Io) -> int:
         )
     partial = _partial_answer(report) if outcome.exit_code == BUDGET_EXIT_CODE else None
     if partial is not None and not args.json:
+        # Spec 2026-10-13 usage §3.6: stdout holds answers only; the partial goes to
+        # stderr, labelled so that no reader takes it for one.
         io.say("budget exhausted; partial answer follows (not an answer):")
         io.stderr.write(partial if partial.endswith("\n") else partial + "\n")
     return outcome.exit_code
 
 
 def _partial_answer(report: Mapping[str, object]) -> str | None:
-    """Return the partial answer of the step that exhausted the run budget, if any."""
+    """The partial answer of the step that stopped the run on its budget, if any."""
     steps = report.get("steps")
     for step in reversed(steps if isinstance(steps, list) else []):
         partial = step.get("partial_answer") if isinstance(step, dict) else None

@@ -1486,3 +1486,56 @@ def test_a_token_block_without_output_keeps_its_input_in_every_display(
     assert f"ha: run {run_id}: exit 0, cost 0.25 USD, input 150 (cached 50)\n" in err
     code, shown, _ = _cli_run(world, "show", run_id)
     assert code == 0 and "total   in 150 out -  $0.25" in shown.splitlines()
+
+
+@dataclass
+class _DyingSpender:
+    """A capped rail whose call dies in flight: the ledger turns incomplete and the step
+    ends with a fallback code (a deadline, a crash or a quota hit)."""
+
+    name: str
+    code: int
+    specs: list[RunSpec] = field(default_factory=list)
+
+    def run(self, spec: RunSpec) -> RunResult:
+        self.specs.append(spec)
+        ledger = spec.budget
+        assert ledger is not None
+        ledger.measure(cost=0.25, input_tokens=100)
+        ledger.complete = False
+        ledger.settle()
+        spec = spec.with_run_dir_defaults()
+        return record(
+            spec,
+            RunResult(
+                exit_code=self.code,
+                provider=self.name,
+                model=spec.model,
+                report_path=spec.report_log,
+                events_log=spec.events_log,
+                tokens=TokenUsage(input=100, output=10),
+                duration_seconds=0.1,
+                tool_call_completed=False,
+                text=None,
+                run_id=run_id_of(spec),
+                cost_usd=0.25,
+                usage_complete=False,
+            ),
+        )
+
+
+def test_a_chain_whose_first_link_dies_in_flight_never_starts_the_second(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the allowance unknown no member may spend (spec usage §3.6): no fallback."""
+    monkeypatch.setattr(registry, "USAGE_DURING_RUN_RAILS", frozenset({"opencode", "codex"}))
+    world.roles('[pair]\nchain = ["opencode", "codex"]\n')
+    world.fakes["opencode"] = _DyingSpender("opencode", code=4)  # type: ignore[assignment]
+    outcome = world.run("pair", max_input_tokens=1000)
+    assert outcome.exit_code == 4
+    assert "codex" not in world.fakes, "the next link was started"
+    assert not any("falling back" in line for line in world.said)
+    budget = _run_json(outcome)["budget"]
+    assert isinstance(budget, dict)
+    assert (budget["spent_complete"], budget["overshoot_input_tokens"]) == (False, None)
+    assert budget["overshoot_cost"] is None

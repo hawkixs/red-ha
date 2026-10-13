@@ -933,7 +933,9 @@ def _run_links(
     attempts: list[RunResult] | None = None,
     ledger: Ledger | None = None,
 ) -> RunResult:
-    """The 0.4.0 chain walks links on 3 and 4 (§3.4). A budget stop is no fallback code."""
+    """The 0.4.0 chain, unchanged: walk the role's links on 3 and 4 (§3.4). A capped run's
+    ``ledger`` goes to every link; a budget stop (7) is no fallback code, so the chain
+    stops there by construction (spec 2026-10-13 usage, D7)."""
     providers = plan.role.providers
     chained = len(providers) > 1
     results: dict[str, RunResult] = {}
@@ -956,6 +958,10 @@ def _run_links(
         say(_configuration_line(index, slot, plan, provider, spec))
         result = get_provider(provider).run(spec)
         results[provider] = result
+        if ledger is not None and not ledger.complete:
+            # Spec 2026-10-13 usage §3.6: the allowance is unknown, so no later link may
+            # spend. Control flow only: the result keeps its own code.
+            return 1
         return result.exit_code
 
     def on_fallback(provider: str, next_provider: str) -> None:
@@ -977,19 +983,19 @@ def _run_links(
 
 
 def _crossing(ledger: Ledger | None, result: RunResult) -> int | None:
-    """Return the count of steps after the crossing, when this result exhausted the budget."""
+    """``steps_after_crossing`` of the step stopped on the cap; ``None`` for any other."""
     if ledger is None or result.failure_reason != BUDGET_EXHAUSTED:
         return None
     return ledger.steps_after_crossing
 
 
 def _budget(ledger: Ledger | None) -> dict[str, object] | None:
-    """Return the ledger record, or None for an uncapped run."""
+    """``run.json``'s ``budget``: the ledger's record, ``None`` on an uncapped run."""
     return ledger.record() if ledger is not None else None
 
 
 def _failed_status(failure_reason: str | None) -> str:
-    """Return the final status for a run that did not answer."""
+    """The final status of a run that did not answer (spec 2026-10-13 usage §3.6)."""
     return "budget_exhausted" if failure_reason == BUDGET_EXHAUSTED else "failed"
 
 
@@ -1361,16 +1367,22 @@ class _Phase:
     entries: list[dict[str, object]]
     results: list[RunResult | None]
     failure_reason: str | None
+    #: Why the steps after a budget stop were not started (spec 2026-10-13 usage §3.6);
+    #: ``None`` when nothing stopped the phase on its budget.
     stopped: str | None = None
 
 
 def _budget_stop(ledger: Ledger, result: RunResult) -> str | None:
-    """Why no later step may start after this result (spec usage §3.6)."""
+    """Why no later step may start after ``result`` (spec 2026-10-13 usage §3.6): its own
+    budget reason, else the ledger's state. A crossing or an unmeasured finish stops the
+    run even when a safety failure (a tripwire) took the step's own code and reason."""
     if result.failure_reason in BUDGET_REASONS:
         return result.failure_reason
     if ledger.crossed:
         return BUDGET_EXHAUSTED
     if ledger.unmeasured:
+        return BUDGET_UNMEASURED
+    if not ledger.complete:
         return BUDGET_UNMEASURED
     return None
 
@@ -1391,6 +1403,11 @@ def _run_phase(
     too large refuses the whole phase before anything starts, its step recorded
     with code ``2``. Each step must answer -- exit ``0`` with a non-empty text --
     or the phase fails (§3.5 step 3).
+
+    Under a budget (spec 2026-10-13 usage §3.6) the steps run ONE AT A TIME, each in its
+    own seat as in parallel: one spender, so no member spends while what is left is
+    unknown. Once a step stops on the budget, no later one starts: each is recorded
+    never started, with the reason, and the phase fails with it.
     """
     bundles = {index: _bundle(slot.role, plan.request, worktree) for index, slot, _ in steps}
     for index, slot, prompt in steps:
@@ -1457,6 +1474,9 @@ def _run_phase(
         try:
             results = [future.result() for future in futures]
         except BaseException:
+            # A Ctrl-C lands here, in the main thread; the rails wait in the workers and
+            # never see it. Their providers die first, then their threads are joined --
+            # only then may the caller remove the worktree they were reading (§3.9).
             procgroup.kill_collected(live)
             pool.shutdown(wait=True, cancel_futures=True)
             raise
@@ -1493,6 +1513,7 @@ def _run_phase(
         entry["verdict"] = read_verdict(result.text)
         entries.append(entry)
         failed = failed or result.exit_code != 0 or not (result.text or "").strip()
+    # The deciding step's own budget reason; a safety failure keeps ``step_failed``.
     reasons = [r.failure_reason for r in results if r is not None and r.failure_reason]
     budget_reasons = [reason for reason in reasons if reason in BUDGET_REASONS]
     failure = budget_reasons[-1] if budget_reasons else ("step_failed" if failed else None)
@@ -1810,6 +1831,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
 
         started = time.monotonic()
         run_dir = entry.run_dir
+        # Spec 2026-10-13 usage §3.6: one ledger for the whole run, one spender at a time.
         ledger = Ledger(plan.caps) if plan.caps.capped else None
         # §3.10: prompt.md is the task as given; the provider gets its template around it.
         task = plan.task if plan.task is not None else plan.prompt
@@ -1894,6 +1916,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
         )
         exit_code, failure_reason = _schema_outcome(request, final, say)
         if failure_reason is None:
+            # Spec 2026-10-13 usage §3.6: the budget meter's reason, where it was null.
             failure_reason = final.failure_reason
         status = "answered" if exit_code == 0 else _failed_status(failure_reason)
         report.update(

@@ -2150,3 +2150,14 @@ class TestBudgetResult:
         assert result.tokens == TokenUsage(input=150, output=None, fresh=100, cached=50)
         assert (result.cost_usd, result.usage_complete) == (0.25, True)
         assert ledger.record()["spent_input_tokens"] == 150
+
+
+def test_a_cost_of_five_thousand_digits_never_raises_and_is_unmeasured(tmp_path: Path) -> None:
+    """json.loads raises a plain ValueError on an int past 4300 digits: read() never raises."""
+    log = tmp_path / "events.jsonl"
+    huge = '{"type": "step_finish", "part": {"id": "f1", "cost": ' + "1" * 5000 + "}}\n"
+    _append(log, _events(_start("s1")) + huge)
+    meter = opencode.StepMeter(Ledger(Caps(max_cost=1.0)))
+    meter.read(log)
+    assert meter.usage().cost_usd is None
+    assert opencode.unfinished_step(log) is True

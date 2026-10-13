@@ -359,7 +359,7 @@ def _events(events_log: Path) -> list[dict[str, object]]:
             continue
         try:
             event = json.loads(raw_line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(event, dict):
             events.append(event)
@@ -731,7 +731,8 @@ def _step_key(event: Mapping[str, object], position: int) -> str:
 def unfinished_step(events_log: Path) -> bool:
     """A ``step_start`` that no ``step_finish`` matched: a model call killed in flight,
     whose consumption is unknown (spec 2026-10-13 usage and budget §3.6). Parts count
-    once each, whatever their re-emissions."""
+    once each, whatever their re-emissions. Calls are matched by count, and a
+    ``step_start`` without an id is keyed by its position in the stream."""
     starts: set[str] = set()
     finishes: set[str] = set()
     for position, event in enumerate(_events(events_log)):
@@ -848,7 +849,7 @@ class StepMeter:
         self._position += 1
         try:
             event = json.loads(raw.decode("utf-8", errors="replace"))
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             return
         if not isinstance(event, dict):
             return
@@ -886,7 +887,8 @@ class StepMeter:
 
     @property
     def in_flight(self) -> bool:
-        """A call started and not finished: its consumption is unknown."""
+        """A call started and not finished: its consumption is unknown. Calls are matched by
+        count, and a ``step_start`` without an id is keyed by its position in the stream."""
         return len(self._starts) > len(self._finishes)
 
     @property
