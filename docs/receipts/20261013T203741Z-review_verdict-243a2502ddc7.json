@@ -1,0 +1,55 @@
+{
+  "digest": "sha256:243a2502ddc7c2559dc334251ca218b3b7025583d4d76ccbc0c655774a1b4991",
+  "idempotency_key": "review_verdict:18c6c9d6f416a737db1c0dc079328f8b9bdec1f3:115513077210",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "spec_plan",
+      "blocking": true,
+      "check_run_id": 115513077210,
+      "diff_truncated": true,
+      "finding_count": 2,
+      "findings": [
+        {
+          "class": "blocker",
+          "evidence": "The plan says an envelope without `result` must measure while keeping the same exit code and failure classification, and Task 5 expects a max-turns envelope with child code 1 to return `PROVIDER_FALLBACK_EXIT_CODE` and `text is None`. However, Task 4's prescribed non-schema flow replaces the existin",
+          "file": "docs/plans/2026-10-13-usage-measurement.md",
+          "id": "F-18-1",
+          "line": null,
+          "severity": "blocking",
+          "status": "new",
+          "title": "Claude max-turns failure classification is underspecified and internally inconsistent"
+        },
+        {
+          "class": "note",
+          "evidence": "A3 states fixtures live under tests/unit/headless_agents/fixtures/, 'not under tests/fixtures/usage/ as \u00a74 first said'; the base \u00a74 text is not edited in place, so a reader of \u00a74 alone still sees the stale path until reaching A3. Consistent with the document's A1\u2013A3 amendment convention, so informat",
+          "file": "docs/specs/2026-10-13-usage-and-budget-design.md",
+          "id": "F-18-2",
+          "line": 466,
+          "severity": "minor",
+          "status": "new",
+          "title": "A3 supersedes \u00a74's fixture path only by amendment"
+        }
+      ],
+      "independent": true,
+      "mode": "light",
+      "not_reviewed": [],
+      "pr": 18,
+      "providers": [
+        "codex",
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "18c6c9d6f416a737db1c0dc079328f8b9bdec1f3",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "request_changes"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T20:37:41.851292Z",
+  "schema_version": 1
+}

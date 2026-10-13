@@ -1,0 +1,64 @@
+{
+  "digest": "sha256:5fff77b575f0b56b3313af83f7171952854f17e55d353d69f841b6abb82f515c",
+  "idempotency_key": "review_verdict:d42fc04a69ae5b7e886542e3265c7fda3f43211a:115528361839",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "spec_plan",
+      "blocking": false,
+      "check_run_id": 115528361839,
+      "diff_truncated": false,
+      "finding_count": 3,
+      "findings": [
+        {
+          "class": "blocker",
+          "evidence": "The plan says an envelope without `result` must measure while keeping the same exit code and failure classification, and Task 5 expects a max-turns envelope with child code 1 to return `PROVIDER_FALLBACK_EXIT_CODE` and `text is None`. However, Task 4's prescribed non-schema flow replaces the existin",
+          "file": "docs/plans/2026-10-13-usage-measurement.md",
+          "id": "F-18-1",
+          "line": null,
+          "severity": "blocking",
+          "status": "fixed",
+          "title": "Claude max-turns failure classification is underspecified and internally inconsistent"
+        },
+        {
+          "class": "note",
+          "evidence": "A3 states fixtures live under tests/unit/headless_agents/fixtures/, 'not under tests/fixtures/usage/ as \u00a74 first said'; the base \u00a74 text is not edited in place, so a reader of \u00a74 alone still sees the stale path until reaching A3. Consistent with the document's A1\u2013A3 amendment convention, so informat",
+          "file": "docs/specs/2026-10-13-usage-and-budget-design.md",
+          "id": "F-18-2",
+          "line": 466,
+          "severity": "minor",
+          "status": "fixed",
+          "title": "A3 supersedes \u00a74's fixture path only by amendment"
+        },
+        {
+          "class": "note",
+          "evidence": "The F-18-1 paragraph names `failure_code_after_a_write` in two different branches of the described chain (\"a writable workspace goes through `failure_code_after_a_write`, otherwise `failure_code_after_a_write` when the OTEL stream in `raw_log` shows a completed tool call\") and asserts the recorded m",
+          "file": "docs/plans/2026-10-13-usage-measurement.md",
+          "id": "F-18-3",
+          "line": 1632,
+          "severity": "minor",
+          "status": "new",
+          "title": "New classification paragraph describes undiffed code; chain wording and fixture assertion are checkable only at build"
+        }
+      ],
+      "independent": true,
+      "mode": "incremental",
+      "not_reviewed": [],
+      "pr": 18,
+      "providers": [
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 2,
+      "sha": "d42fc04a69ae5b7e886542e3265c7fda3f43211a",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T20:42:17.269200Z",
+  "schema_version": 1
+}
