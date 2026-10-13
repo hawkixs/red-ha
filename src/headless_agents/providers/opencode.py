@@ -1289,6 +1289,7 @@ def run_opencode(
                         if meter is not None:
                             meter.read(events_log)
                             if meter.must_stop:
+                                # A budget stop has no answer to wait for: no grace.
                                 kill_process_group(process)
                                 break
                         exhausted, quota_offset = _quota_exhausted(stderr_log, quota_offset)
@@ -1301,6 +1302,12 @@ def run_opencode(
                         continue
                     break
                 if meter is not None:
+                    # The final reads come BEFORE the watcher is released: a crossing or
+                    # an unmeasured finish found only now -- the leader already exited --
+                    # still kills whatever it left running in its group, and what that
+                    # group wrote until it died is read before the ledger settles (spec
+                    # 2026-10-13 usage §3.6). A trailing unterminated line is taken only
+                    # once nothing can still be writing it.
                     meter.read(events_log)
                     if not meter.must_stop:
                         meter.read(events_log, final=True)
@@ -1319,6 +1326,8 @@ def run_opencode(
                 lifeline.release()
 
         if meter is not None:
+            # The outcome depends on the measured spend only, never on whether ha's kill
+            # or the child's own exit came first (spec 2026-10-13 usage §3.6).
             meter.close()
             if meter.ledger.crossed:
                 with stderr_log.open("a", encoding="utf-8") as stderr_stream:
@@ -1533,6 +1542,9 @@ class OpenCodeProvider:
         duration = time.monotonic() - start
         exit_code, git_tampered = settle_run(tripwire, exit_code, spec.stderr_log)
         if meter is not None:
+            # A capped result carries the usage its meter validated: the ledger's own
+            # figures, never a non-finite one (spec 2026-10-13 usage §3.6). Uncapped runs
+            # keep the tolerant reading.
             metered = meter.usage()
             tokens, cost, usage_complete = metered.tokens, metered.cost_usd, metered.complete
         else:
@@ -1541,6 +1553,7 @@ class OpenCodeProvider:
         failure_reason: str | None = None
         partial_text: str | None = None
         if meter is not None and not git_tampered:
+            # A tripwire's own code outranks a budget stop (spec 2026-10-13 usage §3.6).
             if exit_code == BUDGET_EXIT_CODE:
                 failure_reason = BUDGET_EXHAUSTED
                 partial_text = report_text(spec.events_log) or None
