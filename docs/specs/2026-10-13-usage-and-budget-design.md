@@ -331,7 +331,7 @@ TDD for every behaviour, red then green.
 **PR1 — measurement**
 
 - Recorded outputs, one per rail, captured from the installed CLIs and scrubbed of paths
-  and ids, under `tests/fixtures/usage/`: claude envelopes without and with a schema, one
+  and ids, under `tests/unit/headless_agents/fixtures/` (path as amended by A3): claude envelopes without and with a schema, one
   with cache-creation and cache-read tokens and one with two models in `modelUsage`; a
   codex `--json` stream; an agy stream-json output; an opencode stream with re-emitted
   parts; an openai_compat response body; and a vibe stream showing no usage. A test per

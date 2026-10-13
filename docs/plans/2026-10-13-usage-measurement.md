@@ -984,10 +984,10 @@ __all__ = ["StreamMark"]
 ```python
                 # Spec 2026-10-13 usage §3.1: the single turn.completed this invocation
                 # wrote; codex reports no cost (D3).
-                tokens=codex_usage(stream) if stream is not None else None,
+                tokens=codex_usage(invocation_events) if invocation_events is not None else None,
 ```
 
-  where `stream = launch.read(spec.events_log)` is computed right after `duration`.
+  where `invocation_events = launch.read(spec.events_log)` is computed right after `duration` (not `stream`: `CodexProvider.run` already binds `stream` in `with spec.stderr_log.open(...) as stream:`).
 
 - [ ] **Step 5: Run the tests**
 
@@ -1128,13 +1128,13 @@ Expected: FAIL — `test_the_final_result_event_is_measured`: `assert None == To
 ```
 
   In `AgyProvider.run`: `launch = StreamMark()` before `run_agy(...)`, pass `launch=launch`,
-  then after `duration`: `stream = launch.read(spec.events_log)`, and the result's
+  then after `duration`: `invocation_events = launch.read(spec.events_log)`, and the result's
   `tokens=None` becomes:
 
 ```python
                 # Spec 2026-10-13 usage §3.1: the final result event this invocation
                 # wrote; agy reports no cost (D3).
-                tokens=agy_usage(stream) if stream is not None else None,
+                tokens=agy_usage(invocation_events) if invocation_events is not None else None,
 ```
 
   The refusal `RunResult` (`argv_prompt_or_refusal`, before launch) keeps `tokens=None`.
@@ -1617,6 +1617,25 @@ written to :func:`claude_answer_path` -- ``answer_log`` when given, else
 ``<raw_log>.answer.txt``. stderr -- the OTEL console stream, any CLI warning -- always lands
 in ``raw_log``, where :func:`tool_call_completed` reads it. With ``json_schema`` nothing
 moves: stdout goes to ``answer_log`` (or mixes into ``raw_log`` without one), as before."
+
+**How an envelope without `result` keeps today's classification (rail review F-18-1).** Two
+existing mechanisms, both unchanged by this task, decide the outcome; nothing new maps it:
+
+- *Text.* `envelope_answer` writes `""` to the answer file. `run_record.answer_text`
+  (`run_record.py:34-48`) returns `None` for any nonzero exit code, and also for an answer
+  file whose content is empty or whitespace (`return content if content.strip() else
+  None`), so `RunResult.text` is `None` whether the child exited 0 or not.
+- *Exit code.* The child's own exit code goes through the existing post-run
+  classification of `run_claude` (`claude.py`, the block after the `with`: `0` stays `0`,
+  `124` stays `124`, a writable workspace goes through `failure_code_after_a_write`,
+  otherwise `failure_code_after_a_write` when the OTEL stream in `raw_log` shows a
+  completed tool call, else `PROVIDER_FALLBACK_EXIT_CODE`). The recorded max-turns
+  envelope comes with child exit `1` and no tool call, hence `3`
+  (`PROVIDER_FALLBACK_EXIT_CODE`), exactly as before this lot; Task 5's
+  `test_a_max_turns_envelope_measures_but_answers_nothing` pins it.
+
+Measurement (Task 5) reads the envelope separately and never feeds either decision.
+
 Code, right after the `timeout_seconds` check:
 
 ```python
