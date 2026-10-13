@@ -578,6 +578,10 @@ def run_vibe(
             )
             return TIMEOUT_EXIT_CODE
         returncode = int(process.returncode or 0)
+        if returncode == TIMEOUT_EXIT_CODE:
+            # capability.TIMEOUT_EXIT_CODE: a child's own 124 is read as a timeout,
+            # which refuses the switchover whatever the stream shows.
+            return TIMEOUT_EXIT_CODE
         if returncode != 0:
             native = returncode if returncode > 0 else 1
             return _failure_exit_code(events_log, native, workspace, killed=returncode < 0)

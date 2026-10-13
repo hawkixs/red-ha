@@ -566,6 +566,12 @@ class TestRunVibe:
         assert cwd.parent.parent == tmp_path / "homes"
         assert not cwd.exists()
 
+    def test_a_child_exiting_124_itself_is_a_timeout_not_replayable(self, tmp_path: Path) -> None:
+        """capability.TIMEOUT_EXIT_CODE: a child's own 124 is read as a timeout, which
+        refuses the switchover, even when its stream shows nothing written."""
+        script = _fake_vibe(tmp_path, stdout_file=FIXTURES / "read-ok.events.jsonl", exit_code=124)
+        assert _run(tmp_path, script) == 124
+
     def test_turn_limit_exit_zero_is_a_failure(self, tmp_path: Path) -> None:
         script = _fake_vibe(tmp_path, stdout_file=FIXTURES / "turn-limit.events.jsonl")
         assert _run(tmp_path, script) == PROVIDER_FALLBACK_EXIT_CODE
