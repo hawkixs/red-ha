@@ -395,3 +395,29 @@ The CHANGELOG gets an entry under Unreleased.
 | s18 | s16 with `--agent plan` | same as s16 |
 | s19 | `--disabled-tools run_typescript search_tool_functions` | not removed: `search_tool_functions` still ran |
 | s20 | `run_typescript`: `fetch`, `Deno`, `require`, `node:fs` | `fetch` "not supported in the sandbox"; `Deno` and `require` undefined; no connection to the target host; outside untouched |
+
+## Amendments
+
+### A1 — Task 0 measurements (2026-10-13, Vibe 2.26.0, `mistral-large-latest`)
+
+- **API errors (M1).** An invalid `MISTRAL_API_KEY` and an unknown model id both exit 1.
+  stdout holds only the user `message` entry: no `notice`, no effect. The reason is on
+  stderr only (`Error: Invalid API key ...`; `Error: API error occurred: Status 400 ...
+  "type":"invalid_model"`). The rail classifies both as 3 (invalid run, nothing could have
+  written).
+- **grep (M2).** The default runtime has no grep tool. Asked to grep, the model fell back to
+  `bash`, which was denied. The read-only profile enables `read_file` only (§3.4).
+- **MCP (M3).** A `streamable-http` server with static auth from an environment variable
+  connects, and its tools are listed and named `mcp_<server>.<tool>` in effects. A call
+  needs approval by default and is therefore denied in `-p`. A per-tool permission or an
+  `--enabled-tools` glob that admits the call was not established in two attempts, and
+  connecting also writes an MCP descriptor cache under `logs/mcp-descriptors/`. D13
+  therefore applies: **MCP is unsupported in v1**, a run with an MCP server is refused with
+  2, and the README says so. A follow-up ticket carries these measurements.
+- **User configuration (M4, from source).**
+  - User-level instructions: `$VIBE_HOME/AGENTS.md` (`vibe/core/system_prompt.py`).
+  - User hooks: `$VIBE_HOME/hooks.toml`, made of `[[hooks]]` entries with `name`, `type`
+    (`post_agent`, `pre_tool`, `post_tool`) and `command` (`vibe/core/hooks/config.py`).
+
+  The isolation proof plants both.
+

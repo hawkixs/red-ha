@@ -1,0 +1,1 @@
+Error: API error occurred: Status 400. Body: {"object":"error","message":"Invalid model: mistral-nonexistent-model","type":"invalid_model","param":null,"code":"1500","raw_status_code":400}
