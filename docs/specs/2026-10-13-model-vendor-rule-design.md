@@ -262,6 +262,9 @@ TDD, unit only (no provider is called):
 
 ### A1 — argv switches are refused where the argv is built (plan review, round 1)
 
+Accepted by the coordination on 2026-10-13: refusing where the command is built is
+stricter than D2bis's wording and is the right place for it.
+
 D2bis named one detector over "the argv the rail will run" and the environment. The argv
 of a ha run is built by ha's own code from fixed parameters (`build_codex_command`); no
 operator state reaches it. So an argv switch is not a property of a link to record, it

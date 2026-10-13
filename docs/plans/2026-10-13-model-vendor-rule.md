@@ -498,6 +498,33 @@ fixture, asserting `codex_argv_switches(command) == ()`; and one test that
 `build_codex_command` calls the guard (monkeypatch `headless_agents.providers.codex.
 refuse_argv_switches` with a recorder and assert it received the returned argv).
 
+And in `test_provider_claude.py` and `test_provider_codex.py`, the production
+child-environment path of each provider (the environment the engine hands a run is
+`operator_environment(environ)`, and both providers return it as their child
+environment):
+
+```python
+from headless_agents.engine import operator_environment
+from headless_agents.model_vendor import backend_switches
+
+
+def test_the_production_child_environment_carries_only_real_switches() -> None:
+    clean = operator_environment({"PATH": "/bin", "HOME": "/h", "CLAUDE_CODE_USE_BEDROCK": "1"})
+    spec = RunSpec(prompt="P", model="m", environment=clean)
+    env = claude.ClaudeProvider().child_environment(spec, {})
+    assert env is not None and backend_switches("claude", env) == ()
+    claude.ClaudeProvider().build_command(spec)  # builds; claude has no argv switch (A1)
+    switched = RunSpec(
+        prompt="P", model="m",
+        environment=operator_environment({"PATH": "/bin", "ANTHROPIC_BASE_URL": "http://x"}),
+    )
+    env = claude.ClaudeProvider().child_environment(switched, {})
+    assert env is not None and backend_switches("claude", env) == ("ANTHROPIC_BASE_URL",)
+```
+
+(and the codex twin in `test_provider_codex.py` with `CodexProvider`, `OPENAI_BASE_URL`,
+and the `report_log` its `build_command` requires, as that file's existing specs set it).
+
 And in `test_model_vendor.py`, the clean production environment of `claude` and `codex`:
 
 ```python
@@ -734,7 +761,7 @@ One commit: the new `check_independence` signature and its only caller
   - `vendor.LegacyVendorCheck` — today's `VendorCheck`, renamed, unchanged behaviour.
   - `vendor.check_from_document(document: Mapping[str, object], *, where: str) -> VendorCheck | LegacyVendorCheck`.
   - `vendor.AnyVendorCheck = VendorCheck | LegacyVendorCheck` (type alias).
-  - `reviews.ReviewResult.check: AnyVendorCheck`; `reviews.load_check(...) -> AnyVendorCheck | None` (still `None` when no check was written); `reviews.write_check(state, run_id, check: VendorCheck)`.
+  - `reviews.ReviewResult.check: AnyVendorCheck`; `reviews.load_check(...) -> AnyVendorCheck | None` (still `None` when no check was written); `reviews.write_check(state, run_id, check: AnyVendorCheck)` and `reviews.write_result(..., check: AnyVendorCheck)` (the engine only ever passes a `VendorCheck`; the legacy type stays writable so the existing legacy fixtures keep testing the legacy read path).
   - `engine.Plan.vendor_table: VendorTable | None = None` — set on every review plan, `None` otherwise (pinned by a test).
   - `engine.panel_members(plan: Plan) -> tuple[PanelMember, ...]` — `PanelMember(slot.slot, slot.role.name, role_links(slot.role, slot.models, slot.environment))` for every slot of `plan.panel`, reviewers then judge.
   - `review_flow.prepare(..., panel: Sequence[PanelMember], table: VendorTable, ...)` replaces `reviewers=`.
@@ -906,7 +933,14 @@ def test_an_invalid_new_shape_check_is_refused_by_both_readers(tmp_path, mutate)
     mutate(document)
     with pytest.raises(Unknown):
         check_from_document(document, where="t")
-    _write_result(tmp_path, document)  # the file's existing helper that writes result.json
+    # The file's own pattern (test_a_result_ha_never_writes_is_unknown): write a valid
+    # result, then replace its vendor_check with the mutated document.
+    reviews.write_result(tmp_path, RUN, head=HEAD, verdict="approve", text="ok", check=VALID_CHECK)
+    path = reviews.result_path(tmp_path, RUN)
+    stored = json.loads(path.read_text())
+    stored["vendor_check"] = document
+    path.chmod(0o600)
+    path.write_text(json.dumps(stored))
     with pytest.raises(Unknown):
         reviews.load_result(tmp_path, RUN)
 ```
@@ -1033,7 +1067,7 @@ def check_independence(
    `LegacyVendorCheck.from_document`.
 10. `reviews`: `ReviewResult.check: AnyVendorCheck`; `load_check` and `load_result` call
     `check_from_document`; `load_check` keeps returning `None` when no check was written;
-    `write_check(state, run_id, check: VendorCheck)`.
+    `write_check` and `write_result` take `AnyVendorCheck`.
 11. `engine.py`: add `vendor_table: VendorTable | None = None` to `Plan`; where a review
     plan's `panel` is built, load
     `load_table(config_file(VENDORS_FILE_NAME, request.environ, home=request.home))`,
@@ -1059,6 +1093,14 @@ def check_independence(
       `check["authors"] == ["openai"]` and
       `[(m["slot"], [l["vendor"] for l in m["links"]]) for m in check["panel"]] == [("review", ["anthropic"]), ...]`
       with the judge's entry as the panel declares it.
+    - `test_review.py:396`: the refusal label is now the slot, not the word "reviewer":
+      `match=r"review reviewer-codex runs codex.*wrote commit"`.
+    - `test_review.py:429` (`test_after_an_unconfined_write_a_commit_without_provenance_is_its_writers`):
+      give the published writer `"links": [{"provider": "claude", "model": "", "switches": []}]`
+      so the scenario stays a lab conflict (`claude` resolves to anthropic whatever its
+      model), with `match="review reviewer runs claude"`; and add beside it
+      `test_after_a_legacy_unconfined_write_the_review_is_refused`, the same writer
+      without `links`, expecting `UsageError(match="predates model provenance")`.
     - `test_show.py:16, :670, :852, :862` and `test_reviews.py:13, :17`: import and build
       `LegacyVendorCheck` instead of `VendorCheck` (those fixtures are legacy documents
       and keep testing the legacy path); add new-shape cases beside them.
