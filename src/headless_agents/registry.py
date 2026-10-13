@@ -38,6 +38,8 @@ from .providers.openai_compat import GENERIC_NAME, PRESETS, OpenAICompatProvider
 from .providers.opencode import MAX_PROMPT_BYTES as OPENCODE_MAX_PROMPT_BYTES
 from .providers.opencode import OpenCodeProvider
 from .providers.opencode import count_tools as opencode_tools
+from .providers.vibe import VibeProvider
+from .providers.vibe import count_tools as vibe_tools
 from .result import RunResult
 
 _FACTORIES: Final[Mapping[str, Callable[[], AgentProvider]]] = {
@@ -45,6 +47,7 @@ _FACTORIES: Final[Mapping[str, Callable[[], AgentProvider]]] = {
     "codex": CodexProvider,
     "agy": AgyProvider,
     "opencode": OpenCodeProvider,
+    "vibe": VibeProvider,
     **{name: partial(OpenAICompatProvider, name) for name in (*PRESETS, GENERIC_NAME)},
 }
 
@@ -62,6 +65,7 @@ _MAX_PROMPT_BYTES: Final[Mapping[str, int | None]] = {
     "codex": None,
     "agy": AGY_MAX_PROMPT_BYTES,
     "opencode": OPENCODE_MAX_PROMPT_BYTES,
+    "vibe": None,
     **dict.fromkeys(HTTP_PROVIDER_NAMES),
 }
 
@@ -108,6 +112,7 @@ _TOOL_COUNTERS: Final[Mapping[str, Callable[[Path | None], dict[str, int] | None
     "codex": codex_tools,
     "opencode": opencode_tools,
     "agy": agy_tools,
+    "vibe": vibe_tools,
 }
 
 
@@ -140,6 +145,7 @@ _RAIL_HOME_PASSTHROUGH: Final[Mapping[str, frozenset[str]]] = {
     "codex": frozenset({"CODEX_HOME"}),
     "agy": frozenset(),
     "opencode": frozenset(),
+    "vibe": frozenset({"VIBE_HOME"}),
 }
 
 
@@ -151,7 +157,7 @@ def probe_environment(rail: str, home: Path, environ: Mapping[str, str]) -> dict
     (see :data:`_RAIL_HOME_PASSTHROUGH`). ``HOME`` is forced to ``home``, so the
     subprocess reads the same identity the caller resolved its executable against.
 
-    A name that is not one of the four CLI rails -- an HTTP provider, say -- gets
+    A name that is not one of the five CLI rails -- an HTTP provider, say -- gets
     ``environ`` back UNCHANGED: :func:`probe` never spawns a subprocess for it, only
     checks a key variable's presence, and sanitising here would hide the very key
     a caller is checking for.
@@ -253,7 +259,7 @@ def probe(
     _known(name)
     if name in HTTP_PROVIDER_NAMES:
         return _probe_http(name, os.environ if environ is None else environ)
-    # The four CLI rails are invoked by their own name, as the providers do.
+    # The five CLI rails are invoked by their own name, as the providers do.
     command = executable or name
     path = shutil.which(command)
     if path is None:

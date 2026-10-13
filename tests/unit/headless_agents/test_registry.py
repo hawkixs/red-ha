@@ -58,19 +58,20 @@ def _reap_by_force(pid: int) -> None:
 
 
 class TestGetProvider:
-    @pytest.mark.parametrize("name", ["claude", "codex", "agy", "opencode"])
+    @pytest.mark.parametrize("name", ["claude", "codex", "agy", "opencode", "vibe"])
     def test_every_cli_rail_is_reached_by_its_name(self, name: str) -> None:
         provider = registry.get_provider(name)
         assert isinstance(provider, AgentProvider)
         assert provider.name == name
 
-    def test_the_names_are_the_specs_eight(self) -> None:
-        # Spec 3.1: the four CLI rails, the three HTTP presets, the generic one.
+    def test_the_names_are_the_specs_nine(self) -> None:
+        # Spec 3.1: the five CLI rails, the three HTTP presets, the generic one.
         assert registry.PROVIDER_NAMES == (
             "claude",
             "codex",
             "agy",
             "opencode",
+            "vibe",
             "openrouter",
             "mistral",
             "nvidia",
@@ -98,6 +99,10 @@ class TestGetProvider:
 
 
 class TestMaxPromptBytes:
+    def test_vibe_takes_its_prompt_on_stdin_and_counts_its_tools(self) -> None:
+        assert registry.max_prompt_bytes("vibe") is None
+        assert "vibe" in registry._TOOL_COUNTERS
+
     def test_the_stdin_rails_have_no_limit(self) -> None:
         assert registry.max_prompt_bytes("claude") is None
         assert registry.max_prompt_bytes("codex") is None
@@ -169,6 +174,15 @@ class TestProbeHttp:
 
 
 class TestProbe:
+    def test_vibe_probe_keeps_only_its_home_variable(self, tmp_path: Path) -> None:
+        child = registry.probe_environment(
+            "vibe",
+            tmp_path,
+            {"PATH": "/bin", "VIBE_HOME": "/v", "VIBE_ACTIVE_MODEL": "x", "MISTRAL_API_KEY": "k"},
+        )
+        assert child["VIBE_HOME"] == "/v"
+        assert "VIBE_ACTIVE_MODEL" not in child and "MISTRAL_API_KEY" not in child
+
     def test_an_answering_executable_is_available_with_its_version(self, tmp_path: Path) -> None:
         cli = _script(tmp_path, 'echo "2.1.280 (Claude Code)"')
         found = registry.probe("claude", executable=str(cli))

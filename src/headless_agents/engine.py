@@ -758,6 +758,7 @@ DEFAULT_CREDENTIALS: Final[Mapping[str, tuple[str, ...]]] = {
         ".gemini/antigravity-cli/antigravity-oauth-token",
     ),
     "opencode": (".local/share/opencode/auth.json",),
+    "vibe": (),
 }
 
 #: opencode is not on PATH by default; its installer puts it here.
@@ -1078,7 +1079,7 @@ def _admit(
 #: Rails whose shell runs outside any sandbox of theirs: a ``shell`` write role
 #: on one of them is unconfined whatever its proofs say (decision 13; codex
 #: keeps its sandboxed shell).
-_UNSANDBOXED_SHELL_RAILS: Final = frozenset({"claude", "opencode", "agy"})
+_UNSANDBOXED_SHELL_RAILS: Final = frozenset({"claude", "opencode", "agy", "vibe"})
 
 
 def write_is_unconfined(plan: Plan) -> bool:

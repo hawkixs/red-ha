@@ -101,6 +101,7 @@ AUTH: Final[Mapping[str, tuple[str, ...]]] = {
         ".gemini/antigravity-cli/antigravity-oauth-token",
     ),
     "opencode": (".local/share/opencode/auth.json",),
+    "vibe": (),
 }
 #: The subset the engine exposes to HOME-isolated rails (``engine.DEFAULT_CREDENTIALS``).
 EXPOSED: Final[Mapping[str, tuple[str, ...]]] = {
@@ -108,6 +109,7 @@ EXPOSED: Final[Mapping[str, tuple[str, ...]]] = {
     "codex": (),
     "agy": AUTH["agy"],
     "opencode": AUTH["opencode"],
+    "vibe": (),
 }
 
 PROMPT: Final = (

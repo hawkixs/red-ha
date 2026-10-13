@@ -84,6 +84,27 @@
     "reprove": "ha prove opencode"
   },
   {
+    "name": "vibe",
+    "available": true,
+    "detail": "/fake/bin/vibe",
+    "version": "vibe 2.26.0",
+    "max_prompt_bytes": null,
+    "isolation": {
+      "status": "missing",
+      "date": null,
+      "recorded_version": null,
+      "reason": "no proof recorded"
+    },
+    "confinement": {
+      "status": "missing",
+      "date": null,
+      "recorded_version": null,
+      "reason": "no proof recorded"
+    },
+    "mode": "refused",
+    "reprove": "ha prove vibe"
+  },
+  {
     "name": "openrouter",
     "available": false,
     "detail": "OPENROUTER_API_KEY not set",

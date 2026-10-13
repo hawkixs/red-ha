@@ -26,6 +26,7 @@ VERSIONS = {
     "codex": "codex-cli 1.0",
     "agy": "agy 1.0",
     "opencode": "opencode 1.0",
+    "vibe": "vibe 2.26.0",
 }
 
 
@@ -73,7 +74,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _World:
     home = tmp_path / "home"
     (home / ".config" / "ha").mkdir(parents=True)
     (home / ".config" / "ha" / "models.toml").write_text(
-        'claude = "m-claude"\ncodex = "m-codex"\nopencode = "m-opencode"\n'
+        'claude = "m-claude"\ncodex = "m-codex"\nopencode = "m-opencode"\nvibe = "m-vibe"\n'
     )
     built = _World(home=home, environ={"PATH": "/usr/bin:/bin", "HOME": str(home)})
 
@@ -131,6 +132,7 @@ def test_prove_stale_selects_exactly_the_rails_without_a_passing_proof(world: _W
     record_proof(state, "codex", version="codex-cli 1.0", isolation=True)
     record_proof(state, "agy", version="agy 1.0", isolation=True, confinement=True)
     record_proof(state, "opencode", version="opencode 1.0", isolation=True, confinement=True)
+    record_proof(state, "vibe", version="vibe 2.26.0", isolation=True, confinement=True)
     code, _, err = world.run("prove", "--stale")
     assert code == 0, err
     assert world.calls == [("claude", "isolation"), ("codex", "confinement")]
@@ -139,7 +141,7 @@ def test_prove_stale_selects_exactly_the_rails_without_a_passing_proof(world: _W
 def test_prove_stale_with_nothing_stale_runs_nothing_and_exits_0(world: _World) -> None:
     state = world.state
     record_proof(state, "claude", version="claude 1.0", isolation=True)
-    for rail in ("codex", "agy", "opencode"):
+    for rail in ("codex", "agy", "opencode", "vibe"):
         record_proof(state, rail, version=VERSIONS[rail], isolation=True, confinement=True)
     code, out, _ = world.run("prove", "--stale")
     assert code == 0
@@ -251,7 +253,7 @@ def test_prove_stale_leaves_out_a_rail_that_is_not_installed(
     monkeypatch.setattr(cli, "probe", probe_without_agy)
     code, out, _ = world.run("prove", "--stale")
     assert code == 0
-    assert [rail for rail, _ in world.calls] == ["claude", "codex", "codex", "opencode", "opencode"]
+    assert [rail for rail, _ in world.calls] == ["claude", "codex", "codex", "opencode", "opencode", "vibe", "vibe"]
     assert "agy" not in out
 
 

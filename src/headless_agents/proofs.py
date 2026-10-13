@@ -56,7 +56,7 @@ from typing import Final
 
 from .state import Unknown, publish, read_optional
 
-CLI_RAILS: Final = ("claude", "codex", "agy", "opencode")
+CLI_RAILS: Final = ("claude", "codex", "agy", "opencode", "vibe")
 
 #: The installed package's own file(s) whose content determines how each CLI
 #: rail builds its per-run isolation (the ephemeral HOME, its cwd, what gets
@@ -68,6 +68,7 @@ _ISOLATION_SOURCE_FILES: Final[dict[str, tuple[str, ...]]] = {
     "codex": ("providers/codex.py",),
     "agy": ("providers/agy.py", "sandbox.py"),
     "opencode": ("providers/opencode.py",),
+    "vibe": ("providers/vibe.py",),
 }
 
 

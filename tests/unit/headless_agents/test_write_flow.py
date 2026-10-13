@@ -1534,6 +1534,7 @@ def test_a_new_unconfined_write_finding_a_leftover_intent_is_refused(unconfined:
         (("claude",), True, True),
         (("opencode",), True, True),
         (("agy",), True, True),
+        (("vibe",), True, True),
         (("codex", "claude"), True, True),
         (("codex",), True, False),
         (("claude",), False, False),

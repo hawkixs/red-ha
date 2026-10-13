@@ -22,7 +22,11 @@ from headless_agents.proofs import (
 
 
 def test_the_cli_rails() -> None:
-    assert CLI_RAILS == ("claude", "codex", "agy", "opencode")
+    assert CLI_RAILS == ("claude", "codex", "agy", "opencode", "vibe")
+
+
+def test_vibe_isolation_is_bound_to_its_provider_source() -> None:
+    assert isolation_fingerprint("vibe") is not None
 
 
 def test_a_passing_isolation_proof_for_the_installed_version_counts(tmp_path: Path) -> None:

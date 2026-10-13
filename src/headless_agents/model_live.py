@@ -1,9 +1,8 @@
 """Bounded live model lists for the providers that have one (headless-agents 0.5.2, lot 6).
 
-Only three of the eight rails answer a live-list query: ``opencode models``,
+Only three of the nine rails answer a live-list query: ``opencode models``,
 ``agy models``, and OpenRouter's own ``GET /api/v1/models`` (with the key
-:func:`headless_agents.keys.preset_key` resolves). The other five --
-``claude``, ``codex``, ``mistral``, ``nvidia``, ``openai-compat`` -- are
+:func:`headless_agents.keys.preset_key` resolves). The other six -- ``claude``, ``codex``, ``vibe``, ``mistral``, ``nvidia``, ``openai-compat`` -- are
 reported ``catalogue-only``: this reflects the live lists specified in the
 parallel-runs design (§3.6), never a claim that those providers have no
 models.
