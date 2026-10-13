@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
 
+from .budget import cost_cap, input_tokens_cap
 from .context import ContextLevel
 from .providers.codex import REASONING_EFFORTS
 from .providers.openai_compat import GENERIC_NAME
@@ -71,6 +72,8 @@ _FIELDS: Final = frozenset(
         "max_tokens",
         "instructions",
         "language",
+        "max_cost",
+        "max_input_tokens",
     }
 )
 
@@ -106,6 +109,10 @@ class Role:
     implicit: bool = False
     declared: frozenset[str] = frozenset()
     language: str | None = None
+    #: Budget caps (spec 2026-10-13 usage and budget §3.4): run-level, the smallest
+    #: value any role of the run sets applies unless the command line gives one.
+    max_cost: float | None = None
+    max_input_tokens: int | None = None
 
     @property
     def providers(self) -> tuple[str, ...]:
@@ -241,6 +248,19 @@ def _role(path: Path, name: str, table: object, mcp_profiles: Mapping[str, objec
     if language is not None and language not in LANGUAGES:
         raise entry.refuse(f"language must be one of {', '.join(LANGUAGES)}")
 
+    max_cost: float | None = None
+    if "max_cost" in table:
+        try:
+            max_cost = cost_cap(table["max_cost"])
+        except ValueError as exc:
+            raise entry.refuse(f"max_cost {exc}") from None
+    max_input_tokens: int | None = None
+    if "max_input_tokens" in table:
+        try:
+            max_input_tokens = input_tokens_cap(table["max_input_tokens"])
+        except ValueError as exc:
+            raise entry.refuse(f"max_input_tokens {exc}") from None
+
     context = table.get("context", "full" if write else "global")
     if context not in CONTEXT_LEVELS:
         raise entry.refuse("context must be one of full, global, none")
@@ -263,6 +283,8 @@ def _role(path: Path, name: str, table: object, mcp_profiles: Mapping[str, objec
         max_tokens=cast("int | None", max_tokens),
         declared=frozenset(table),
         language=language,
+        max_cost=max_cost,
+        max_input_tokens=max_input_tokens,
     )
     rule = capability_rule(role, mcp_profiles)
     if rule is not None:

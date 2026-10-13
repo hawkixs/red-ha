@@ -191,3 +191,58 @@ def test_invalid_toml_is_a_roles_error(tmp_path: Path) -> None:
 def test_a_deeply_nested_file_is_a_roles_error(tmp_path: Path) -> None:
     with pytest.raises(RolesError, match="nested too deeply"):
         _load(tmp_path, "a = " + "[" * 2000 + "]" * 2000 + "\n")
+
+
+# ── budget caps (spec 2026-10-13 usage and budget §3.4) ─────────────────────
+
+
+def test_a_role_carries_its_budget_caps(tmp_path: Path) -> None:
+    text = '[judge]\nprovider = "opencode"\nmax_cost = 0.5\nmax_input_tokens = 2000000\n'
+    role = _load(tmp_path, text)["judge"]
+    assert (role.max_cost, role.max_input_tokens) == (0.5, 2_000_000)
+    assert {"max_cost", "max_input_tokens"} <= role.declared
+
+
+def test_an_integer_cost_cap_is_a_number_of_usd(tmp_path: Path) -> None:
+    role = _load(tmp_path, '[judge]\nprovider = "opencode"\nmax_cost = 2\n')["judge"]
+    assert role.max_cost == 2.0 and isinstance(role.max_cost, float)
+
+
+def test_a_role_without_caps_is_uncapped(tmp_path: Path) -> None:
+    role = _load(tmp_path, '[rev]\nprovider = "opencode"\n')["rev"]
+    assert (role.max_cost, role.max_input_tokens) == (None, None)
+    assert (implicit_role("opencode").max_cost, implicit_role("opencode").max_input_tokens) == (
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "true", '"0.5"'])
+def test_an_invalid_cost_cap_is_refused(tmp_path: Path, value: str) -> None:
+    with pytest.raises(
+        RolesError, match=r"\[judge\] max_cost must be a finite number of USD greater than zero"
+    ):
+        _load(tmp_path, f'[judge]\nprovider = "opencode"\nmax_cost = {value}\n')
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "1000.0", "1.5", "true", "nan", '"1000"'])
+def test_an_invalid_input_token_cap_is_refused(tmp_path: Path, value: str) -> None:
+    with pytest.raises(
+        RolesError,
+        match=r"\[judge\] max_input_tokens must be a whole number of input tokens greater than zero",
+    ):
+        _load(tmp_path, f'[judge]\nprovider = "opencode"\nmax_input_tokens = {value}\n')
+
+
+def test_a_misspelt_cap_is_still_an_unknown_field(tmp_path: Path) -> None:
+    with pytest.raises(RolesError, match=r"\[judge\] unknown field 'max_costs'"):
+        _load(tmp_path, '[judge]\nprovider = "opencode"\nmax_costs = 1\n')
+
+
+def test_the_caps_leave_model_effort_and_timeout_resolution_alone(tmp_path: Path) -> None:
+    text = (
+        '[judge]\nprovider = "opencode"\nmodel = "opencode-go/m"\neffort = "high"\n'
+        "timeout = 90\nmax_cost = 0.5\n"
+    )
+    role = _load(tmp_path, text)["judge"]
+    assert (role.model, role.effort, role.timeout) == ("opencode-go/m", "high", 90.0)

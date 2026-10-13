@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from headless_agents import registry
+from headless_agents.budget import Caps
 from headless_agents.protocol import AgentProvider
 from headless_agents.providers import agy, opencode
 
@@ -455,3 +456,50 @@ class TestProbeEnvironment:
         home = tmp_path / "home"
         environ = {"PATH": "/usr/bin:/bin", "OPENROUTER_API_KEY": "k"}
         assert registry.probe_environment("openrouter", home, environ) == dict(environ)
+
+
+# ── rail capabilities for budget caps (spec 2026-10-13 usage and budget §3.5) ─
+
+
+def test_only_opencode_reports_usage_during_a_run() -> None:
+    during = [name for name in registry.PROVIDER_NAMES if registry.reports_usage_during_run(name)]
+    assert during == ["opencode"]
+
+
+def test_claude_opencode_and_the_http_providers_report_a_cost() -> None:
+    reporting = {name for name in registry.PROVIDER_NAMES if registry.reports_cost(name)}
+    assert reporting == {"claude", "opencode", *registry.HTTP_PROVIDER_NAMES}
+
+
+def test_an_unknown_rail_has_no_capability() -> None:
+    with pytest.raises(registry.UnknownProvider):
+        registry.reports_usage_during_run("nobody")
+    with pytest.raises(registry.UnknownProvider):
+        registry.reports_cost("nobody")
+
+
+@pytest.mark.parametrize("name", ["claude", "codex", "agy", "vibe", "openrouter", "openai-compat"])
+def test_a_cap_on_a_rail_that_reports_usage_only_at_the_end_is_refused(name: str) -> None:
+    caps = Caps(max_input_tokens=1000)
+    assert registry.cap_refusal(name, caps) == (
+        f"max_input_tokens 1000 cannot be enforced: {name} reports no usage during a run"
+    )
+    assert registry.cap_refusal(name, Caps(max_cost=0.5)) == (
+        f"max_cost 0.5 USD cannot be enforced: {name} reports no usage during a run"
+    )
+
+
+def test_opencode_takes_either_cap_and_no_cap_is_never_refused() -> None:
+    assert registry.cap_refusal("opencode", Caps(max_cost=0.5, max_input_tokens=1000)) is None
+    assert registry.cap_refusal("codex", Caps()) is None
+
+
+def test_a_cost_cap_on_a_rail_that_reports_no_cost_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No rail is like that today; the rule holds the day one is (spec §3.5)."""
+    monkeypatch.setattr(registry, "USAGE_DURING_RUN_RAILS", frozenset({"opencode", "codex"}))
+    assert registry.cap_refusal("codex", Caps(max_input_tokens=1000)) is None
+    assert registry.cap_refusal("codex", Caps(max_cost=0.5)) == (
+        "max_cost 0.5 USD cannot be enforced: codex reports no cost"
+    )
