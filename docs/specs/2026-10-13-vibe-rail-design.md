@@ -207,10 +207,11 @@ vibe --workdir <workspace | empty private directory> --agent accept-edits
 | write + shell | the write list plus `bash` | — | write_file, edit, bash |
 
 The `accept-edits` agent already grants `write_file` and `edit`; the explicit permissions
-make the profile independent of the agent's defaults. The workspace boundary and `.git`
-protection come from Vibe's gate (an outside path needs approval, which `-p` denies; a
-write to `.git/hooks` or `.git/config` is escalated). ha's git tripwire (`armed_run`,
-`settle_run`) still guards `.git` as on every rail.
+make the profile independent of the agent's defaults. The workspace boundary comes from
+Vibe's gate: an outside path needs approval, which `-p` denies. `.git` inside the
+workspace is NOT protected by the gate for `write_file` and `edit` (see A3): ha's git
+tripwire (`armed_run`, `settle_run`) is what guards it, after the run, as on claude and
+opencode.
 
 The code-mode meta-tools stay on: they cannot be disabled, and their effects pass the same
 gate. The README says so as an accepted, measured limit.
@@ -457,6 +458,15 @@ Two findings from the first live `ha prove vibe` with `mistral-large-4` replace 
   `xhigh`/`max`/`ultra` → `max`. An unknown effort is refused before start (exit 2), and
   `vibe` joins the catalog's effort-optional providers. The confinement proof already runs
   at `reasoning_effort="low"`.
+- **`.git` inside the workspace (correction of §3.4).** Vibe 2.26.0 escalates `.git`
+  paths only in its shell command policy. Its file tools (`resolve_file_tool_permission`)
+  check the deny and allow lists, the sensitive patterns and the workdir root, so a
+  `write_file` or `edit` on `<ws>/.git/config` or `<ws>/.git/hooks/*` runs. The git tripwire
+  detects that after the run (exit 1, git refused afterwards), as on claude and opencode.
+  The confinement proof targets only paths outside the workspace, so it does not cover
+  this case (found by the branch review, 2026-10-13).
+- **A child's own 124.** Vibe exiting 124 by itself is read as a timeout (124) before any
+  stream classification, per `capability.TIMEOUT_EXIT_CODE`. It is never replayable.
 - **Confinement prompt.** The shared prompt offered a shell command for each file. The
   probe's write profile has no shell, so Vibe denied `bash` and the control was never
   written ("no control written"). Vibe now gets its own prompt: `write_file` for both

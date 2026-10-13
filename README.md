@@ -311,6 +311,10 @@ SIGTERM to the process group, then SIGKILL after the grace period. Every Vibe de
 returns 124, never 4, so a timed-out Vibe link stops a fallback chain; put Vibe last if
 the chain must advance.
 
+Vibe's gate stops paths outside the workspace, but not `.git` inside it: `write_file` and
+`edit` can write `<ws>/.git/config` or a hook. The `.git` tripwire (below) catches that
+after the run, as on claude and opencode.
+
 MCP is unsupported in v1; ha refuses a run configured with an MCP server (exit 2).
 Versions other than 2.26.0 and Vibe API error shapes beyond the two recorded are
 unverified.
