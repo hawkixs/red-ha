@@ -416,7 +416,7 @@ def _any_event_fail_closed(
             continue
         try:
             event = json.loads(raw_line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             return True
         if not isinstance(event, dict):
             # Valid JSON that is not an object (a bare string, a number, an
@@ -646,7 +646,7 @@ def event_stream_error(
             continue
         try:
             event = json.loads(raw_line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             return f"opencode JSONL line {line_number} is malformed"
         if not isinstance(event, dict):
             return f"opencode JSONL line {line_number} is not an object"

@@ -2161,3 +2161,11 @@ def test_a_cost_of_five_thousand_digits_never_raises_and_is_unmeasured(tmp_path:
     meter.read(log)
     assert meter.usage().cost_usd is None
     assert opencode.unfinished_step(log) is True
+
+
+def test_a_line_nested_past_the_recursion_limit_fails_closed_everywhere(tmp_path: Path) -> None:
+    """A model-controlled tool input nested past Python's limit raises RecursionError."""
+    log = tmp_path / "events.jsonl"
+    log.write_text('{"type": "tool_use", "part": ' + "[" * 100_000 + "]" * 100_000 + "}\n")
+    assert opencode.tool_call_started(log, server="srv") is True
+    assert opencode.event_stream_error(log, server=None) == "opencode JSONL line 1 is malformed"

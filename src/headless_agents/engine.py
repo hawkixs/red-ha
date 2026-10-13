@@ -935,7 +935,9 @@ def _run_links(
 ) -> RunResult:
     """The 0.4.0 chain, unchanged: walk the role's links on 3 and 4 (§3.4). A capped run's
     ``ledger`` goes to every link; a budget stop (7) is no fallback code, so the chain
-    stops there by construction (spec 2026-10-13 usage, D7)."""
+    stops there by construction (spec 2026-10-13 usage, D7). A link that leaves the ledger
+    incomplete (a call in flight) also ends the chain, whatever its code: with the
+    allowance unknown no later link may spend (§3.6)."""
     providers = plan.role.providers
     chained = len(providers) > 1
     results: dict[str, RunResult] = {}
@@ -961,6 +963,11 @@ def _run_links(
         if ledger is not None and not ledger.complete:
             # Spec 2026-10-13 usage §3.6: the allowance is unknown, so no later link may
             # spend. Control flow only: the result keeps its own code.
+            if result.exit_code != 0:
+                say(
+                    f"{provider} exited {result.exit_code}; the run's spend is unknown "
+                    "(budget_unmeasured): no fallback"
+                )
             return 1
         return result.exit_code
 
@@ -1406,8 +1413,9 @@ def _run_phase(
 
     Under a budget (spec 2026-10-13 usage §3.6) the steps run ONE AT A TIME, each in its
     own seat as in parallel: one spender, so no member spends while what is left is
-    unknown. Once a step stops on the budget, no later one starts: each is recorded
-    never started, with the reason, and the phase fails with it.
+    unknown. Once a step stops on the budget, or leaves the ledger incomplete, no later
+    one starts: each is recorded never started, with the reason, and the phase fails with
+    it, even when the stopping step itself answered.
     """
     bundles = {index: _bundle(slot.role, plan.request, worktree) for index, slot, _ in steps}
     for index, slot, prompt in steps:
@@ -1513,10 +1521,13 @@ def _run_phase(
         entry["verdict"] = read_verdict(result.text)
         entries.append(entry)
         failed = failed or result.exit_code != 0 or not (result.text or "").strip()
-    # The deciding step's own budget reason; a safety failure keeps ``step_failed``.
+    # The deciding step's own budget reason; a safety failure keeps ``step_failed``; a step
+    # left unstarted by a stop fails the phase with the stop's reason, even after a member
+    # that answered (spec 2026-10-13 usage §3.6).
     reasons = [r.failure_reason for r in results if r is not None and r.failure_reason]
     budget_reasons = [reason for reason in reasons if reason in BUDGET_REASONS]
-    failure = budget_reasons[-1] if budget_reasons else ("step_failed" if failed else None)
+    unstarted = stopped if any(result is None for result in results) else None
+    failure = budget_reasons[-1] if budget_reasons else ("step_failed" if failed else unstarted)
     return _Phase(entries=entries, results=results, failure_reason=failure, stopped=stopped)
 
 
@@ -1631,6 +1642,8 @@ def _execute_review(
                     reason=phase.stopped,
                 )
             )
+            # A review without its judge has no verdict: the stop's reason fails it.
+            failure = failure or phase.stopped
         verdict: Verdict | None = None
         text = deciding.text if deciding is not None else None
         if failure is None:

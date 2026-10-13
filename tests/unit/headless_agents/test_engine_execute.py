@@ -1535,6 +1535,10 @@ def test_a_chain_whose_first_link_dies_in_flight_never_starts_the_second(
     assert outcome.exit_code == 4
     assert "codex" not in world.fakes, "the next link was started"
     assert not any("falling back" in line for line in world.said)
+    assert (
+        "opencode exited 4; the run's spend is unknown (budget_unmeasured): no fallback"
+        in world.said
+    )
     budget = _run_json(outcome)["budget"]
     assert isinstance(budget, dict)
     assert (budget["spent_complete"], budget["overshoot_input_tokens"]) == (False, None)

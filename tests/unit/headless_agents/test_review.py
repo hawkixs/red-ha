@@ -1350,6 +1350,11 @@ OC_WORKFLOWS = """
 shape = "review"
 review = ["oc-a", "oc-b"]
 judge = "oc-judge"
+
+[oc-solo]
+shape = "review"
+review = ["oc-a"]
+judge = "oc-judge"
 """
 
 
@@ -1360,12 +1365,15 @@ class _PanelSpender:
     and a partial once the run's spend reaches the cap. ``unmeasured_call`` stands for a
     finish without the measure its cap needs; ``tamper_call`` for a call whose tripwire
     fired, which the rail reports as a plain exit 1 without any budget reason or partial,
-    whatever it spent. ``most_active`` counts overlapping calls."""
+    whatever it spent. ``in_flight_call`` answers with exit 0 while a model call is still
+    in flight, which leaves the ledger incomplete. ``most_active`` counts overlapping
+    calls."""
 
     name: str
     costs: list[float]
     unmeasured_call: int | None = None
     tamper_call: int | None = None
+    in_flight_call: int | None = None
     specs: list[RunSpec] = field(default_factory=list)
     active: int = 0
     most_active: int = 0
@@ -1385,6 +1393,8 @@ class _PanelSpender:
                 if unmeasured:
                     ledger.complete = False
                     ledger.unmeasured = True
+                if call == self.in_flight_call:
+                    ledger.complete = False
                 ledger.settle()
                 crossed = ledger.crossed
             spec = spec.with_run_dir_defaults()
@@ -1417,7 +1427,7 @@ class _PanelSpender:
                     cost_usd=cost,
                     partial_text=f"partial of call {call}" if crossed else None,
                     failure_reason=reason,
-                    usage_complete=not unmeasured,
+                    usage_complete=not unmeasured and call != self.in_flight_call,
                 ),
             )
         finally:
@@ -1598,3 +1608,36 @@ def test_a_member_dying_in_flight_leaves_the_allowance_unknown_and_starts_nothin
         (None, False, "budget_unmeasured"),
         (None, False, "budget_unmeasured"),
     ]
+
+
+def test_a_lone_member_answering_with_a_call_in_flight_fails_the_review_without_its_judge(
+    world: World,
+) -> None:
+    """Spec 2026-10-13 usage §3.6: the allowance is unknown, so the judge never starts, and
+    a review without its judge has no verdict."""
+    spender = _oc_panel(world, 0.25, 0.25)
+    spender.in_flight_call = 0
+    outcome = world.review("oc-solo", max_cost=1.0)
+    assert len(spender.specs) == 1, "the judge started while the allowance was unknown"
+    assert outcome.exit_code == 1
+    report = _report(outcome)
+    assert (report["status"], report["failure_reason"]) == ("failed", "budget_unmeasured")
+    assert report.get("verdict") is None
+    steps = report["steps"]
+    assert isinstance(steps, list)
+    assert [(s["exit_code"], s["started"], s["failure_reason"]) for s in steps] == [
+        (0, True, None),
+        (None, False, "budget_unmeasured"),
+    ]
+
+
+def test_a_first_member_answering_with_a_call_in_flight_fails_the_review_as_unmeasured(
+    world: World,
+) -> None:
+    spender = _oc_panel(world, 0.25, 0.25, 0.25)
+    spender.in_flight_call = 0
+    outcome = world.review("oc-panel", max_cost=1.0)
+    assert len(spender.specs) == 1, "a member started while the allowance was unknown"
+    assert outcome.exit_code == 1
+    report = _report(outcome)
+    assert (report["status"], report["failure_reason"]) == ("failed", "budget_unmeasured")
