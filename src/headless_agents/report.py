@@ -29,12 +29,13 @@ RUN_KEYS: Final = (
     "repository", "base", "head", "branch", "lineage", "continues", "findings_from",
     "implement_providers", "commits", "failure_reason", "vendor_check", "cleanup", "pid",
     "started_at", "duration_seconds", "cost_usd", "cost_complete", "tokens",
-    "tokens_complete", "steps",
+    "tokens_complete", "budget", "steps",
 )  # fmt: skip
 STEP_KEYS: Final = (
     "index", "slot", "role", "dir", "provider", "model", "model_reported",
     "model_source", "effort", "timeout_seconds", "exit_code", "duration_seconds",
-    "tokens", "cost_usd", "tools", "verdict", "attempts",
+    "tokens", "cost_usd", "tools", "verdict", "attempts", "partial_answer",
+    "steps_after_crossing", "started", "failure_reason", "usage_complete",
 )  # fmt: skip
 #: The ``TokenUsage`` fields a run total sums (spec 2026-10-13 usage §3.3).
 TOKEN_FIELDS: Final = ("input", "output", "fresh", "cached", "thinking")
@@ -82,6 +83,7 @@ def step_entry(
     effort: str | None = None,
     timeout_seconds: float | None = None,
     attempts: Sequence[RunResult] = (),
+    steps_after_crossing: int | None = None,
 ) -> dict[str, object]:
     return {
         "index": index,
@@ -102,6 +104,12 @@ def step_entry(
         "tools": dict(tools) if tools is not None else None,
         "verdict": None,
         "attempts": [attempt_entry(attempt) for attempt in attempts],
+        # Spec 2026-10-13 usage and budget §3.6: kept apart from any answer.
+        "partial_answer": result.partial_text,
+        "steps_after_crossing": steps_after_crossing,
+        "started": True,
+        "failure_reason": result.failure_reason,
+        "usage_complete": result.usage_complete,
     }
 
 
@@ -109,7 +117,28 @@ def refused_step_entry(*, index: int, slot: str, role: str, step_dir: str) -> di
     """A step refused at its start -- its prompt too large once the diff is known (§3.4):
     recorded with code ``2``, nothing measured because nothing ran."""
     entry: dict[str, object] = dict.fromkeys(STEP_KEYS)
-    entry.update(index=index, slot=slot, role=role, dir=step_dir, exit_code=2, attempts=[])
+    entry.update(
+        index=index, slot=slot, role=role, dir=step_dir, exit_code=2, attempts=[], started=True
+    )
+    return entry
+
+
+def skipped_step_entry(
+    *, index: int, slot: str, role: str, step_dir: str, reason: str
+) -> dict[str, object]:
+    """A step never started because an earlier one stopped the run on its budget (spec
+    2026-10-13 usage §3.6): no exit code, ``started: false``, the reason. It spent
+    nothing, so the run totals leave it out."""
+    entry: dict[str, object] = dict.fromkeys(STEP_KEYS)
+    entry.update(
+        index=index,
+        slot=slot,
+        role=role,
+        dir=step_dir,
+        attempts=[],
+        started=False,
+        failure_reason=reason,
+    )
     return entry
 
 
@@ -125,9 +154,12 @@ def attempt_entry(result: RunResult) -> dict[str, object]:
 
 
 def _spenders(steps: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
-    """Every step and every attempt of a step: what a run total adds up."""
+    """Every step and every attempt of a step: what a run total adds up. A step never
+    started spent nothing and is left out."""
     spenders: list[Mapping[str, object]] = []
     for step in steps:
+        if step.get("started") is False:
+            continue
         spenders.append(step)
         attempts = step.get("attempts")
         if isinstance(attempts, list):
@@ -158,12 +190,17 @@ def with_step(report: Mapping[str, object], step: Mapping[str, object]) -> dict[
     spenders = _spenders(steps)
     costs = [s.get("cost_usd") for s in spenders]
     measured = [c for c in costs if isinstance(c, int | float) and not isinstance(c, bool)]
+    # A spend known only as a lower bound (spec 2026-10-13 usage §3.6) is summed, and
+    # makes both totals incomplete.
+    bounded = any(s.get("usage_complete") is False for s in spenders)
     updated = dict(report)
     updated["steps"] = steps
     updated["cost_usd"] = sum(measured) if measured else None
-    updated["cost_complete"] = len(measured) == len(costs)
+    updated["cost_complete"] = len(measured) == len(costs) and not bounded
     updated["tokens"] = run_tokens(spenders)
-    updated["tokens_complete"] = all(isinstance(s.get("tokens"), Mapping) for s in spenders)
+    updated["tokens_complete"] = (
+        all(isinstance(s.get("tokens"), Mapping) for s in spenders) and not bounded
+    )
     return updated
 
 
@@ -177,6 +214,46 @@ def _count(value: int) -> str:
 
 def _usd(value: float) -> str:
     return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def _float_of(value: object) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _int_of(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def budget_line(budget: object) -> str | None:
+    """``budget  cost 0.375 of 0.25 USD (overshoot 0.125 USD)``: a capped run's budget as
+    ``ha show`` prints it (spec 2026-10-13 usage §3.6); ``None`` for an uncapped run.
+
+    An incomplete spend reads as a lower bound (``≥``) and its overshoot as unknown.
+    """
+    if not isinstance(budget, Mapping):
+        return None
+    complete = budget.get("spent_complete") is not False
+    at_least = "" if complete else "≥ "
+    figures: list[str] = []
+    max_cost, spent_cost = _float_of(budget.get("max_cost")), _float_of(budget.get("spent_cost"))
+    if max_cost is not None and spent_cost is not None:
+        figure = f"cost {at_least}{_usd(spent_cost)} of {_usd(max_cost)} USD"
+        overshoot = _float_of(budget.get("overshoot_cost"))
+        if complete and overshoot is not None:
+            figure += f" (overshoot {_usd(overshoot)} USD)"
+        figures.append(figure)
+    max_tokens = _int_of(budget.get("max_input_tokens"))
+    spent_tokens = _int_of(budget.get("spent_input_tokens"))
+    if max_tokens is not None and spent_tokens is not None:
+        figure = f"input {at_least}{_count(spent_tokens)} of {_count(max_tokens)}"
+        over_tokens = _int_of(budget.get("overshoot_input_tokens"))
+        if complete and over_tokens is not None:
+            figure += f" (overshoot {_count(over_tokens)})"
+        figures.append(figure)
+    if not figures:
+        return None
+    line = "budget  " + ", ".join(figures)
+    return line if complete else line + " (incomplete, overshoot unknown)"
 
 
 def summary_line(report: Mapping[str, object]) -> str:
@@ -222,9 +299,11 @@ __all__ = [
     "STEP_KEYS",
     "TOKEN_FIELDS",
     "attempt_entry",
+    "budget_line",
     "new_report",
     "refused_step_entry",
     "run_tokens",
+    "skipped_step_entry",
     "step_dir_name",
     "step_entry",
     "summary_line",

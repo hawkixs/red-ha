@@ -31,7 +31,16 @@ from typing import Final
 
 from . import lineage as lineages
 from . import locks, procgroup, proof_state, retire, review_flow, reviews, structured, write_flow
-from .capability import scoped_environment
+from .budget import (
+    BUDGET_EXHAUSTED,
+    BUDGET_REASONS,
+    BUDGET_UNMEASURED,
+    Caps,
+    Ledger,
+    cost_cap,
+    input_tokens_cap,
+)
+from .capability import BUDGET_EXIT_CODE, scoped_environment
 from .chain import run_chain
 from .cli_models import ModelsError, check_known_model, model_sources_for, models_for
 from .config_paths import ConfigPathError, config_file, state_dir
@@ -47,6 +56,7 @@ from .providers.openai_compat import GENERIC_NAME
 from .registry import (
     HTTP_PROVIDER_NAMES,
     PROVIDER_NAMES,
+    cap_refusal,
     get_provider,
     max_prompt_bytes,
     probe,
@@ -59,6 +69,7 @@ from .report import (
     RUN_JSON,
     new_report,
     refused_step_entry,
+    skipped_step_entry,
     step_dir_name,
     step_entry,
     summary_line,
@@ -146,6 +157,10 @@ class Request:
     #: ``--output-schema FILE``, parsed: the JSON Schema the answer is constrained by
     #: (0.5.3 lot 1); a provider or role target only, every link able to honour it.
     output_schema: Mapping[str, object] | None = None
+    #: ``--max-cost USD`` and ``--max-input-tokens N`` (spec 2026-10-13 usage and budget
+    #: §3.4): run-level caps, not role overrides, so a workflow takes them too.
+    max_cost: float | None = None
+    max_input_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +204,9 @@ class Plan:
     #: The review ``--findings`` names, read from the registry; its result is read by
     #: ``execute``, which composes the fix prompt from it (§3.6).
     findings_from: str | None = None
+    #: The run's one budget (spec 2026-10-13 usage and budget §3.4), admitted on every
+    #: link of every step (§3.5); ``Caps()`` when the run is not capped.
+    caps: Caps = Caps()
 
 
 def operator_environment(environ: Mapping[str, str]) -> dict[str, str]:
@@ -721,6 +739,57 @@ def _plan_workflow(request: Request, workflow: Workflow, config: Config) -> Plan
     )
 
 
+def _request_caps(request: Request) -> Caps:
+    """The caps the command line gives, validated here too: a library caller passes the
+    engine's gates like the CLI (spec 2026-10-13 usage §3.4)."""
+    try:
+        max_cost = cost_cap(request.max_cost) if request.max_cost is not None else None
+    except ValueError as exc:
+        raise UsageError(f"--max-cost {request.max_cost!r}: {exc}") from None
+    try:
+        max_input_tokens = (
+            input_tokens_cap(request.max_input_tokens)
+            if request.max_input_tokens is not None
+            else None
+        )
+    except ValueError as exc:
+        raise UsageError(f"--max-input-tokens {request.max_input_tokens!r}: {exc}") from None
+    return Caps(max_cost=max_cost, max_input_tokens=max_input_tokens)
+
+
+def _capped(planned: Plan) -> Plan:
+    """``planned`` with the run's one budget, admitted (spec 2026-10-13 usage §3.4, §3.5).
+
+    Each cap is the command line's when given, else the smallest value any role of the
+    run sets -- the role, or every slot role of a review -- else none. A cap is refused,
+    before anything is registered or started (D1, D6), when any link of any step runs on
+    a rail that cannot enforce it.
+    """
+    given = _request_caps(planned.request)
+    roles = [slot.role for slot in planned.panel] or [planned.role]
+    caps = Caps(
+        max_cost=(
+            given.max_cost
+            if given.max_cost is not None
+            else min((r.max_cost for r in roles if r.max_cost is not None), default=None)
+        ),
+        max_input_tokens=(
+            given.max_input_tokens
+            if given.max_input_tokens is not None
+            else min(
+                (r.max_input_tokens for r in roles if r.max_input_tokens is not None),
+                default=None,
+            )
+        ),
+    )
+    for role in roles:
+        for provider in role.providers:
+            refusal = cap_refusal(provider, caps)
+            if refusal is not None:
+                raise UsageError(f"role {role.name}, link {provider}: {refusal}; nothing ran")
+    return replace(planned, caps=caps)
+
+
 def plan(request: Request) -> Plan:
     """Resolve ``request`` and apply every gate that needs no git; raise :class:`UsageError`."""
     if request.wait_seconds is not None:
@@ -729,7 +798,7 @@ def plan(request: Request) -> Plan:
     config = load_config(request.environ, request.home)
     workflow = config.workflows.get(request.target)
     if workflow is not None:
-        return _plan_workflow(request, workflow, config)
+        return _capped(_plan_workflow(request, workflow, config))
     _refuse_options_of_other_shapes(request, None)
     declared, profiles = config.roles, config.profiles
     if request.target not in declared and request.target not in PROVIDER_NAMES:
@@ -750,17 +819,19 @@ def plan(request: Request) -> Plan:
     prompt = _prompt(request)
     _check_prompt_size(role, prompt, _bundle(role, request, None))
     mcp = _mcp(role, request)
-    return Plan(
-        request=request,
-        role=role,
-        models=models,
-        model_sources={name: source for name, (_, source) in resolved.items()},
-        prompt=prompt,
-        mcp=mcp,
-        environment=_environment(request.environ, mcp),
-        run_dir=_run_dir(request),
-        state=state_dir(request.environ, home=request.home),
-        task=prompt,
+    return _capped(
+        Plan(
+            request=request,
+            role=role,
+            models=models,
+            model_sources={name: source for name, (_, source) in resolved.items()},
+            prompt=prompt,
+            mcp=mcp,
+            environment=_environment(request.environ, mcp),
+            run_dir=_run_dir(request),
+            state=state_dir(request.environ, home=request.home),
+            task=prompt,
+        )
     )
 
 
@@ -818,6 +889,7 @@ def _spec_for(
     run_id: str,
     run_dir: Path,
     workspace: Workspace | None,
+    budget: Ledger | None = None,
 ) -> RunSpec:
     http = provider in HTTP_PROVIDER_NAMES
     role = plan.role
@@ -844,6 +916,7 @@ def _spec_for(
         context=bundle,
         extra=extra,
         output_schema=plan.request.output_schema,
+        budget=budget,
     )
 
 
@@ -858,8 +931,13 @@ def _run_links(
     index: int = 1,
     slot: str = "run",
     attempts: list[RunResult] | None = None,
+    ledger: Ledger | None = None,
 ) -> RunResult:
-    """The 0.4.0 chain, unchanged: walk the role's links on 3 and 4 (§3.4)."""
+    """The 0.4.0 chain, unchanged: walk the role's links on 3 and 4 (§3.4). A capped run's
+    ``ledger`` goes to every link; a budget stop (7) is no fallback code, so the chain
+    stops there by construction (spec 2026-10-13 usage, D7). A link that leaves the ledger
+    incomplete (a call in flight) also ends the chain, whatever its code: with the
+    allowance unknown no later link may spend (§3.6)."""
     providers = plan.role.providers
     chained = len(providers) > 1
     results: dict[str, RunResult] = {}
@@ -871,11 +949,26 @@ def _run_links(
 
     def run_one(provider: str) -> int:
         spec = _spec_for(
-            provider, plan, bundle, run_id=run_id, run_dir=link_dir(provider), workspace=workspace
+            provider,
+            plan,
+            bundle,
+            run_id=run_id,
+            run_dir=link_dir(provider),
+            workspace=workspace,
+            budget=ledger,
         )
         say(_configuration_line(index, slot, plan, provider, spec))
         result = get_provider(provider).run(spec)
         results[provider] = result
+        if ledger is not None and not ledger.complete:
+            # Spec 2026-10-13 usage §3.6: the allowance is unknown, so no later link may
+            # spend. Control flow only: the result keeps its own code.
+            if result.exit_code != 0:
+                say(
+                    f"{provider} exited {result.exit_code}; the run's spend is unknown "
+                    "(budget_unmeasured): no fallback"
+                )
+            return 1
         return result.exit_code
 
     def on_fallback(provider: str, next_provider: str) -> None:
@@ -894,6 +987,23 @@ def _run_links(
     if outcome.dead_links:
         say(f"no answer within the deadline from: {', '.join(outcome.dead_links)}")
     return final
+
+
+def _crossing(ledger: Ledger | None, result: RunResult) -> int | None:
+    """``steps_after_crossing`` of the step stopped on the cap; ``None`` for any other."""
+    if ledger is None or result.failure_reason != BUDGET_EXHAUSTED:
+        return None
+    return ledger.steps_after_crossing
+
+
+def _budget(ledger: Ledger | None) -> dict[str, object] | None:
+    """``run.json``'s ``budget``: the ledger's record, ``None`` on an uncapped run."""
+    return ledger.record() if ledger is not None else None
+
+
+def _failed_status(failure_reason: str | None) -> str:
+    """The final status of a run that did not answer (spec 2026-10-13 usage §3.6)."""
+    return "budget_exhausted" if failure_reason == BUDGET_EXHAUSTED else "failed"
 
 
 def _configuration_line(index: int, slot: str, plan: Plan, provider: str, spec: RunSpec) -> str:
@@ -1151,8 +1261,12 @@ def _execute_write(
     say: Callable[[str], None],
     findings_head: str | None = None,
     admission_wait: locks.AdmissionWait | None = None,
+    ledger: Ledger | None = None,
 ) -> Outcome:
-    """A write run -- a role's, or an ``implement`` workflow's: §3.8.3, then its report."""
+    """A write run -- a role's, or an ``implement`` workflow's: §3.8.3, then its report.
+
+    A budget stop keeps today's handling of a failed step's residue; only its code and status
+    are its own (spec 2026-10-13 usage §3.6)."""
     role, run_dir = plan.role, entry.run_dir
     step_dir = run_dir / "steps" / step_name
     earlier: list[RunResult] = []
@@ -1168,6 +1282,7 @@ def _execute_write(
             say=say,
             slot=slot,
             attempts=earlier,
+            ledger=ledger,
         )
         say(f"step 1 {slot} {role.name}: exit {final.exit_code}")
         return final
@@ -1206,6 +1321,7 @@ def _execute_write(
                 effort=role.effort,
                 timeout_seconds=role.timeout,
                 attempts=earlier,
+                steps_after_crossing=_crossing(ledger, outcome.final),
             ),
         )
     failure_reason = outcome.failure_reason
@@ -1225,6 +1341,7 @@ def _execute_write(
         implement_providers=list(entry.providers),
         commits=[{"sha": sha, "made_by": made_by} for sha, made_by in outcome.commits],
         failure_reason=failure_reason,
+        budget=_budget(ledger),
         duration_seconds=round(time.monotonic() - started, 3),
     )
     write_report(run_dir, report)
@@ -1257,6 +1374,24 @@ class _Phase:
     entries: list[dict[str, object]]
     results: list[RunResult | None]
     failure_reason: str | None
+    #: Why the steps after a budget stop were not started (spec 2026-10-13 usage §3.6);
+    #: ``None`` when nothing stopped the phase on its budget.
+    stopped: str | None = None
+
+
+def _budget_stop(ledger: Ledger, result: RunResult) -> str | None:
+    """Why no later step may start after ``result`` (spec 2026-10-13 usage §3.6): its own
+    budget reason, else the ledger's state. A crossing or an unmeasured finish stops the
+    run even when a safety failure (a tripwire) took the step's own code and reason."""
+    if result.failure_reason in BUDGET_REASONS:
+        return result.failure_reason
+    if ledger.crossed:
+        return BUDGET_EXHAUSTED
+    if ledger.unmeasured:
+        return BUDGET_UNMEASURED
+    if not ledger.complete:
+        return BUDGET_UNMEASURED
+    return None
 
 
 def _run_phase(
@@ -1267,6 +1402,7 @@ def _run_phase(
     run_dir: Path,
     worktree: Path,
     say: Callable[[str], None],
+    ledger: Ledger | None = None,
 ) -> _Phase:
     """Run ``(index, slot, prompt)`` steps in parallel, each read-only on the worktree.
 
@@ -1274,6 +1410,12 @@ def _run_phase(
     too large refuses the whole phase before anything starts, its step recorded
     with code ``2``. Each step must answer -- exit ``0`` with a non-empty text --
     or the phase fails (§3.5 step 3).
+
+    Under a budget (spec 2026-10-13 usage §3.6) the steps run ONE AT A TIME, each in its
+    own seat as in parallel: one spender, so no member spends while what is left is
+    unknown. Once a step stops on the budget, or leaves the ledger incomplete, no later
+    one starts: each is recorded never started, with the reason, and the phase fails with
+    it, even when the stopping step itself answered.
     """
     bundles = {index: _bundle(slot.role, plan.request, worktree) for index, slot, _ in steps}
     for index, slot, prompt in steps:
@@ -1314,26 +1456,55 @@ def _run_phase(
                 index=index,
                 slot=slot.slot,
                 attempts=earlier,
+                ledger=ledger,
             )
         said(f"step {index} {slot.slot} {slot.role.name}: exit {final.exit_code}")
         return final
 
-    pool = ThreadPoolExecutor(max_workers=len(steps))
-    futures = [pool.submit(run_one, step) for step in steps]
-    try:
-        results = [future.result() for future in futures]
-    except BaseException:
-        # A Ctrl-C lands here, in the main thread; the rails wait in the workers and
-        # never see it. Their providers die first, then their threads are joined --
-        # only then may the caller remove the worktree they were reading (§3.9).
-        procgroup.kill_collected(live)
-        pool.shutdown(wait=True, cancel_futures=True)
-        raise
-    pool.shutdown(wait=True)
+    stopped: str | None = None
+    results: list[RunResult | None]
+    if ledger is not None:
+        results = []
+        try:
+            for step in steps:
+                if stopped is not None:
+                    results.append(None)
+                    continue
+                ran = run_one(step)
+                results.append(ran)
+                stopped = _budget_stop(ledger, ran)
+        except BaseException:
+            procgroup.kill_collected(live)
+            raise
+    else:
+        pool = ThreadPoolExecutor(max_workers=len(steps))
+        futures = [pool.submit(run_one, step) for step in steps]
+        try:
+            results = [future.result() for future in futures]
+        except BaseException:
+            # A Ctrl-C lands here, in the main thread; the rails wait in the workers and
+            # never see it. Their providers die first, then their threads are joined --
+            # only then may the caller remove the worktree they were reading (§3.9).
+            procgroup.kill_collected(live)
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        pool.shutdown(wait=True)
     entries = []
     failed = False
     for (index, slot, _), result in zip(steps, results, strict=True):
         name = step_dir_name(index, slot.slot, slot.role.name)
+        if result is None:
+            assert stopped is not None
+            entries.append(
+                skipped_step_entry(
+                    index=index,
+                    slot=slot.slot,
+                    role=slot.role.name,
+                    step_dir=f"steps/{name}",
+                    reason=stopped,
+                )
+            )
+            continue
         entry = step_entry(
             index=index,
             slot=slot.slot,
@@ -1345,13 +1516,19 @@ def _run_phase(
             effort=slot.role.effort,
             timeout_seconds=slot.role.timeout,
             attempts=attempts_of.get(index, []),
+            steps_after_crossing=_crossing(ledger, result),
         )
         entry["verdict"] = read_verdict(result.text)
         entries.append(entry)
         failed = failed or result.exit_code != 0 or not (result.text or "").strip()
-    return _Phase(
-        entries=entries, results=list(results), failure_reason="step_failed" if failed else None
-    )
+    # The deciding step's own budget reason; a safety failure keeps ``step_failed``; a step
+    # left unstarted by a stop fails the phase with the stop's reason, even after a member
+    # that answered (spec 2026-10-13 usage §3.6).
+    reasons = [r.failure_reason for r in results if r is not None and r.failure_reason]
+    budget_reasons = [reason for reason in reasons if reason in BUDGET_REASONS]
+    unstarted = stopped if any(result is None for result in results) else None
+    failure = budget_reasons[-1] if budget_reasons else ("step_failed" if failed else unstarted)
+    return _Phase(entries=entries, results=results, failure_reason=failure, stopped=stopped)
 
 
 def _execute_review(
@@ -1365,9 +1542,12 @@ def _execute_review(
     started: float,
     say: Callable[[str], None],
     admission_wait: locks.AdmissionWait | None = None,
+    ledger: Ledger | None = None,
 ) -> Outcome:
     """A review run: the vendor rule and the pinned change, the reviewers in parallel,
-    then the judge; the verdict, the result and the cleanup (§3.5, §3.8.4)."""
+    then the judge; the verdict, the result and the cleanup (§3.5, §3.8.4). Under a budget
+    the reviewers take turns, and a budget stop leaves the judge unstarted and the review
+    without a verdict (spec 2026-10-13 usage §3.6)."""
     request, run_dir = plan.request, entry.run_dir
     table = plan.vendor_table
     if table is None:
@@ -1422,10 +1602,11 @@ def _execute_review(
             run_dir=run_dir,
             worktree=prepared.worktree,
             say=say,
+            ledger=ledger,
         )
         entries, failure = list(phase.entries), phase.failure_reason
         deciding: RunResult | None = phase.results[0] if len(phase.results) == 1 else None
-        if failure is None and judge is not None:
+        if failure is None and phase.stopped is None and judge is not None:
             index, slot = judge
             answers = [
                 ReviewText(
@@ -1444,10 +1625,25 @@ def _execute_review(
                 run_dir=run_dir,
                 worktree=prepared.worktree,
                 say=say,
+                ledger=ledger,
             )
             entries.extend(judged.entries)
             failure = judged.failure_reason
             deciding = judged.results[0]
+        elif phase.stopped is not None and judge is not None:
+            index, slot = judge
+            name = step_dir_name(index, slot.slot, slot.role.name)
+            entries.append(
+                skipped_step_entry(
+                    index=index,
+                    slot=slot.slot,
+                    role=slot.role.name,
+                    step_dir=f"steps/{name}",
+                    reason=phase.stopped,
+                )
+            )
+            # A review without its judge has no verdict: the stop's reason fails it.
+            failure = failure or phase.stopped
         verdict: Verdict | None = None
         text = deciding.text if deciding is not None else None
         if failure is None:
@@ -1478,6 +1674,8 @@ def _execute_review(
         status, code = "approved", 0
     elif verdict == "changes":
         status, code = "changes", review_flow.CHANGES_EXIT_CODE
+    elif failure == BUDGET_EXHAUSTED:
+        status, code = "budget_exhausted", BUDGET_EXIT_CODE
     else:
         status, code = "failed", 1
     for step in entries:
@@ -1488,6 +1686,7 @@ def _execute_review(
         verdict=verdict,
         text=text,
         failure_reason=failure,
+        budget=_budget(ledger),
         cleanup=cleanup,
         duration_seconds=round(time.monotonic() - started, 3),
     )
@@ -1645,6 +1844,8 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
 
         started = time.monotonic()
         run_dir = entry.run_dir
+        # Spec 2026-10-13 usage §3.6: one ledger for the whole run, one spender at a time.
+        ledger = Ledger(plan.caps) if plan.caps.capped else None
         # §3.10: prompt.md is the task as given; the provider gets its template around it.
         task = plan.task if plan.task is not None else plan.prompt
         (run_dir / PROMPT_FILE).write_text(task, encoding="utf-8")
@@ -1669,6 +1870,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
                     started=started,
                     say=say,
                     admission_wait=admission_wait,
+                    ledger=ledger,
                 ),
                 say,
             )
@@ -1692,6 +1894,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
                     say=say,
                     findings_head=findings.head if findings is not None else None,
                     admission_wait=admission_wait,
+                    ledger=ledger,
                 ),
                 say,
             )
@@ -1705,6 +1908,7 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
             workspace=Workspace(path=repository),
             say=say,
             attempts=earlier,
+            ledger=ledger,
         )
         say(f"step 1 run {role.name}: exit {final.exit_code}")
         report = with_step(
@@ -1720,15 +1924,20 @@ def execute(plan: Plan, *, say: Callable[[str], None]) -> Outcome:
                 effort=role.effort,
                 timeout_seconds=role.timeout,
                 attempts=earlier,
+                steps_after_crossing=_crossing(ledger, final),
             ),
         )
         exit_code, failure_reason = _schema_outcome(request, final, say)
-        status = "answered" if exit_code == 0 else "failed"
+        if failure_reason is None:
+            # Spec 2026-10-13 usage §3.6: the budget meter's reason, where it was null.
+            failure_reason = final.failure_reason
+        status = "answered" if exit_code == 0 else _failed_status(failure_reason)
         report.update(
             status=status,
             exit_code=exit_code,
             text=final.text,
             failure_reason=failure_reason,
+            budget=_budget(ledger),
             duration_seconds=round(time.monotonic() - started, 3),
         )
         write_report(run_dir, report)

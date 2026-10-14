@@ -40,6 +40,8 @@ from typing import TYPE_CHECKING, Final
 
 from . import lineage as lineages
 from . import locks, provenance, quarantine
+from .budget import BUDGET_EXHAUSTED, BUDGET_UNMEASURED
+from .capability import BUDGET_EXIT_CODE
 from .git_tripwire import GitTampered, Tripwire, resolve_git_dir
 from .gitops import git
 from .lineage import LineageState, PendingWrite
@@ -914,6 +916,16 @@ def _tampered(result: RunResult, tripwire: Tripwire | None) -> tuple[str, ...]:
     return tuple(sorted(set(reported) | set(own)))
 
 
+def _step_failure(final: RunResult) -> tuple[int, str, str]:
+    """``(exit code, status, reason)`` of a write whose step failed: a budget stop keeps
+    its own (spec 2026-10-13 usage and budget §3.6); anything else is ``step_failed``."""
+    if final.failure_reason == BUDGET_EXHAUSTED:
+        return BUDGET_EXIT_CODE, "budget_exhausted", BUDGET_EXHAUSTED
+    if final.failure_reason == BUDGET_UNMEASURED:
+        return 1, "failed", BUDGET_UNMEASURED
+    return 1, "failed", "step_failed"
+
+
 def _outcome(
     code: int,
     status: str,
@@ -1131,11 +1143,14 @@ def run_write_step(
                 + ", ".join(changes.left_out)
             )
         failed_step = final.exit_code != 0
+        failure_code, failure_status, failure_reason = _step_failure(final)
         if not changes.any:
-            status = "failed" if failed_step else "no_change"
+            status = failure_status if failed_step else "no_change"
             _publish(write, status=status, commits=(), compromised=None)
             if failed_step:
-                return _outcome(1, "failed", "step_failed", write, head=head, final=final)
+                return _outcome(
+                    failure_code, failure_status, failure_reason, write, head=head, final=final
+                )
             say(f"no change in {write.worktree}; nothing committed")
             return _outcome(NO_CHANGE_EXIT_CODE, "no_change", None, write, head=head, final=final)
 
@@ -1174,7 +1189,7 @@ def run_write_step(
                         f"change.patch not written: git diff exited {code}: "
                         f"{first[0] if first else '(no message)'}\n".encode()
                     )
-            status = "failed" if failed_step else "committed"
+            status = failure_status if failed_step else "committed"
             _publish(write, status=status, commits=commits, compromised=None)
         except GitTampered:
             # A tamper signal, not an engine error: the intent stays for the quarantine.
@@ -1190,7 +1205,13 @@ def run_write_step(
             return _abandon(write, exc, attributed, final=final)
         if failed_step:
             return _outcome(
-                1, "failed", "step_failed", write, commits=commits, head=head, final=final
+                failure_code,
+                failure_status,
+                failure_reason,
+                write,
+                commits=commits,
+                head=head,
+                final=final,
             )
         return _outcome(0, "committed", None, write, commits=commits, head=head, final=final)
 

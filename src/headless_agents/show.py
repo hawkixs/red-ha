@@ -23,7 +23,7 @@ from typing import Final
 
 from . import lineage as lineages
 from . import locks, provenance, reviews
-from .report import KIND, PROMPT_FILE, RUN_JSON, RUN_KEYS, SCHEMA
+from .report import KIND, PROMPT_FILE, RUN_JSON, RUN_KEYS, SCHEMA, budget_line
 from .run_record import RESULT_FILE_NAME
 from .runs import RUN_ID_PATTERN, Entry, Registry, RegistryError
 from .state import Unknown
@@ -359,6 +359,7 @@ def from_dir(run_dir: Path) -> Shown:
 _STATUS_WORDS: Final[Mapping[str, str]] = {
     "no_change": "no change",
     "changes": "changes requested",
+    "budget_exhausted": "budget exhausted",
 }
 
 
@@ -446,12 +447,40 @@ def format_tools(tools: object) -> str:
     return ", ".join(f"{name} {count}" for name, count in ranked)
 
 
+def _budget_lines(report: Mapping[str, object], steps: Sequence[object]) -> list[str]:
+    """The budget, each step's budget reason, then each partial answer, labelled so that
+    none reads as an answer (spec 2026-10-13 usage and budget §3.6). Nothing for a run
+    without a budget record: an older report renders as before."""
+    lines: list[str] = []
+    budget = budget_line(report.get("budget"))
+    if budget is not None:
+        lines.append(budget)
+    named = [step for step in steps if isinstance(step, dict)]
+    for step in named:
+        reason = step.get("failure_reason")
+        if isinstance(reason, str):
+            started = "not started, " if step.get("started") is False else ""
+            lines.append(f"step    {step.get('slot')} {step.get('role')}: {started}{reason}")
+    for step in named:
+        partial = step.get("partial_answer")
+        if isinstance(partial, str) and partial.strip():
+            lines.append(
+                f"--- {step.get('slot')} {step.get('role')}: "
+                "partial answer (budget exhausted, not an answer) ---"
+            )
+            lines.append(partial.rstrip("\n"))
+    return lines
+
+
 def _dash(value: object) -> str:
     return "-" if value is None else str(value)
 
 
 def _step_cells(step: Mapping[str, object]) -> list[str]:
     model, verdict = step.get("model"), step.get("verdict")
+    if step.get("started") is False:
+        # Never started (spec 2026-10-13 usage §3.6): no model ran, not even "(auto)".
+        model = "-"
     return [
         _dash(step.get("slot")),
         _dash(step.get("role")),
@@ -610,6 +639,7 @@ def render(shown: Shown) -> str:
     totals = _totals_line(report)
     if totals is not None:
         lines.append(totals)
+    lines.extend(_budget_lines(report, steps if isinstance(steps, list) else []))
     text = report.get("text")
     if isinstance(text, str) and text.strip():
         lines.append(f"--- {rows[-1][0] if rows else 'run'} ---")

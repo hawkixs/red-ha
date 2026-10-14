@@ -244,3 +244,11 @@ def test_a_history_ha_never_writes_is_unknown(tmp_path: Path, history: object) -
     path.write_text(json.dumps(document))
     with pytest.raises(Unknown, match="compromised_history"):
         lineage.load(state, _OWNER)
+
+
+def test_a_member_stopped_on_its_budget_round_trips(tmp_path: Path) -> None:
+    """Spec 2026-10-13 usage and budget §3.6: lineages record ``budget_exhausted``."""
+    state = tmp_path / "state"
+    stopped = replace(_lineage(tmp_path), members={_OWNER: "budget_exhausted"})
+    lineage.create(state, stopped)
+    assert lineage.load(state, _OWNER).members == {_OWNER: "budget_exhausted"}

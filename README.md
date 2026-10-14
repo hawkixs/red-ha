@@ -80,6 +80,8 @@ result = CodexProvider().run(spec)
 #   in ChainResult.dead_links). claude and vibe never return 4: claude's OTEL
 #   telemetry is exported on an interval, and Vibe emits its stream on completion,
 #   so neither can prove that no tool call ever started.
+# 7 stopped at its budget cap: an opencode run given RunSpec.budget (a Ledger); what it
+#   wrote so far is result.partial_text, never result.text, and no chain advances on 7.
 ```
 
 The same kind of run through the facade, by provider name, with one directory
@@ -471,6 +473,7 @@ the next link; its usage and cost remain recorded.
 | HTTP 429 or 5xx, host unreachable | `3` | advances -- no tool could have written |
 | HTTP 401/403, a malformed reply, anything else | `1` | stops |
 | no model, no/invalid `base_url`, an unsupported option, `base_url`/`key_env` given to a preset | `2` | stops, nothing sent |
+| a budget cap (`--max-cost`, `--max-input-tokens`, a role's `max_cost`/`max_input_tokens`) on any link | `2` | refused before launch: an HTTP provider reports usage only with its answer |
 
 A failure is recorded as a category and a status (`request failed: http (HTTP 401)`),
 never as the provider's error body: that body may quote the key.
@@ -510,7 +513,7 @@ uv tool install "headless-agents @ git+https://github.com/hawkixs/red-ha.git@v0.
 ha run TARGET [PROMPT | -] [-m|--model MODEL] [--effort E] [--timeout SECONDS] [--wait SECONDS]
        [--context full|global|none] [--context-parents] [--mcp PROFILE]
        [--base-url URL --key-env VAR] [--max-tokens N] [--repo PATH] [--json] [--run-dir DIR]
-       [--output-schema FILE]
+       [--output-schema FILE] [--max-cost USD] [--max-input-tokens N]
        [--write [--shell] [--base REF]]
        [--continue RUN_ID] [--findings RUN_ID] [--head REF] [--run RUN_ID]
 ha roles [--json]
@@ -564,6 +567,32 @@ reads free, and the two `git worktree add` calls measurably overlap -- before re
   (exit `2`). The answer is the run's text; one that is not JSON exits `1` with
   `failure_reason: "output_not_json"`, never `0`. Example: `ha run codex --output-schema
   ok.json "Answer with ok = true."`.
+
+- **`--max-cost USD`** and **`--max-input-tokens N`** (spec
+  `docs/specs/2026-10-13-usage-and-budget-design.md`): a budget for the whole run, alone or
+  together. `USD` is a finite number greater than zero, `N` a whole number greater than zero
+  counting the total input the rail reports, cache reads included; anything else exits `2`.
+  The `roles.toml` keys `max_cost` and `max_input_tokens` set the same caps on a role; the
+  command line wins, else the smallest value any role of the run sets (every slot role of a
+  review), and a workflow accepts both options. Every link of every step must report usage
+  during the run -- opencode alone today -- and `--max-cost` also needs a reported cost: a
+  cap on claude, codex, agy, vibe or an HTTP provider is refused before anything is
+  registered or started (exit `2`, naming the role, the link and the reason). A capped run
+  runs its steps one at a time (a review's members take turns, each in its own seat), reads
+  opencode's stream every 0.1 s, and once the run's spend reaches a cap kills the step at
+  once and exits `7`: status `budget_exhausted`, no fallback link, no later step, member or
+  judge. The spend overshoots by at most the model calls (opencode `step_finish` parts) that
+  finished within one poll of the crossing, all recorded. What the step wrote so far is a
+  partial answer, never the answer: on stderr after
+  `ha: budget exhausted; partial answer follows (not an answer):`, in the step's
+  `partial_answer`, and under a labelled block in `ha show`; stdout stays empty, except that
+  with `--json` it carries run.json, whose `partial_answer` holds the text, and stderr has
+  no partial-answer block. A write's header (run id, branch, diffstat, patch) goes to stderr
+  too. A finished step that reports no cost (under `--max-cost`) or no input tokens (under
+  `--max-input-tokens`) stops the run with exit `1` and
+  `failure_reason: "budget_unmeasured"`. An implement step stopped on its cap commits its
+  residue as any failed step does, and can be continued. Example:
+  `ha run opencode -m opencode-go/glm-5.3-flash --max-input-tokens 2000000 "Review it."`.
 
 `TARGET` is a provider (`ha run codex "..."`), a role declared in
 `~/.config/ha/roles.toml` -- an executor: one provider, or a `chain` of them, with optional
@@ -750,6 +779,10 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   (proof that nothing was written); each link gets its own directory under `links/` and
   may name its own model after the FIRST colon (`openrouter:meta/llama:free`). A provider
   appears at most once in a chain.
+- **Role budget caps**: `max_cost = 0.5` (USD) and `max_input_tokens = 2000000` in a
+  `roles.toml` role cap every run that uses the role, as `--max-cost` and
+  `--max-input-tokens` do (validated the same way; a boolean is refused). A role whose links
+  cannot enforce its cap is refused at each run, before anything starts.
 - **Role language**: `language = "en"` in `roles.toml` instructs every link to write its
   whole answer in that language. This is an instruction in the role's context, not an
   answer validator.
@@ -879,28 +912,37 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   `exit_code`, `verdict`, `text`, `repository`, `base`, `head`, `branch`, `lineage`,
   `continues`, `findings_from`, `implement_providers`, `commits`, `failure_reason`,
   `vendor_check`, `cleanup`, `pid`, `started_at`, `duration_seconds`, `cost_usd`,
-  `cost_complete`, `tokens`, `tokens_complete` and `steps`. `tokens` sums each token field
+  `cost_complete`, `tokens`, `tokens_complete`, `budget` and `steps`. `budget` is `null` on
+  an uncapped run, else `{max_cost, max_input_tokens, spent_cost, spent_input_tokens,
+  spent_complete, overshoot_cost, overshoot_input_tokens}`: a cap not set is `null` and so
+  is its overshoot, `overshoot = max(0, spent - cap)`; when a step's spend is only a lower
+  bound (a finish without its measure, a call killed in flight) `spent_complete` is false,
+  `spent_*` read "at least" and both overshoots are `null`. `tokens` sums each token field
   over every step and every attempted link that measured it (`null` when none did),
   `tokens_complete` is false when a step or link measured none, and `cost_usd`/`cost_complete`
   include attempted links. Also at the top: `prompt.md` (the task, written once), and
   for `--write` the worktree and `change.patch`. Each entry of `steps` names its `provider`,
   `model`, `model_source`, `effort`, `timeout_seconds`, `exit_code`, `tokens`, `cost_usd`,
   `tools`, `attempts` (one `{provider, model, exit_code, tokens, cost_usd}` per chain link
-  that ran before the final link) and `dir` -- the run-relative path of
-  that step's own directory, `steps/<NN>-<slot>-<role>/`, holding its logs, its `commit.log`
-  for a write step, and its own `result.json` (schema 1, unchanged, no `"kind"`, still
-  `"provider"`): `run.json` is the run's report, `result.json` stays each provider's own
-  contract, unaffected by anything above -- a chained role's own link result lands under
-  `steps/<NN>-<slot>-<role>/links/<index>-<provider>/` and is copied up to the step's
-  `result.json` for the link that answered. Every `ha run` that starts ends with one stderr line,
+  that ran before the final link), `partial_answer` (what a step stopped on its budget had
+  written, never an answer), `steps_after_crossing`, `started` (`false` for a step never
+  started after a budget stop, whose `exit_code` is `null`), `failure_reason`
+  (`budget_exhausted` or `budget_unmeasured`), `usage_complete` and `dir` -- the
+  run-relative path of that step's own directory, `steps/<NN>-<slot>-<role>/`, holding its
+  logs, its `commit.log` for a write step, and its own `result.json` (schema 1, unchanged,
+  no `"kind"`, still `"provider"`): `run.json` is the run's report, `result.json` stays each
+  provider's own contract, unaffected by anything above -- a chained role's own link result
+  lands under `steps/<NN>-<slot>-<role>/links/<index>-<provider>/` and is copied up to the
+  step's `result.json` for the link that answered. Every `ha run` that starts ends with one
+  stderr line,
   `ha: run <id>: exit <code>, cost <usd> USD, input <n> (cached <n>), output <n>`, omitting
   what was not measured and marking incomplete figures `≥ … (incomplete)`; `ha show` prints
-  the same totals as its `total` line. `ha runs` lists runs newest first; `ha clean
-  RUN_ID` removes one (its worktree through git, its branch kept).
-- **Exit codes**: `0` answer, or a review's APPROVE; `1` failure; `2` invalid usage
-  (nothing ran); `3` provider unavailable, chain exhausted; `4` timeout with no tool call
-  started; `5` `--write` finished with no change; `6` a review's CHANGES verdict; `124`
-  timeout.
+  the same totals as its `total` line. `ha runs` lists runs newest first; `ha clean RUN_ID`
+  removes one (its worktree through git, its branch kept).
+- **Exit codes**: `0` answer, or a review's APPROVE; `1` failure; `2` invalid usage (nothing
+  ran); `3` provider unavailable, chain exhausted; `4` timeout with no tool call started;
+  `5` `--write` finished with no change; `6` a review's CHANGES verdict; `7` the run stopped
+  at its budget cap (partial answer kept apart, no fallback); `124` timeout.
 
 
 ### Manually lift a lineage or quarantine

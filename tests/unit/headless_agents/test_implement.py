@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 
 from headless_agents import cli, engine, lineage, locks, provenance, quarantine, write_flow
+from headless_agents.budget import BUDGET_EXHAUSTED, BUDGET_UNMEASURED
+from headless_agents.capability import BUDGET_EXIT_CODE
 from headless_agents.engine import Overrides, Request, UsageError, execute, plan
 from headless_agents.proofs import CLI_RAILS, record_proof
 from headless_agents.registry import Probe
@@ -633,3 +635,164 @@ def test_a_write_chain_records_the_link_that_spent_before_the_final_one(
     ]
     assert report["tokens"]["input"] == 400
     assert report["cost_usd"] == pytest.approx(0.04)
+
+
+# ── a capped implement run (spec 2026-10-13 usage and budget §3.6) ──────────
+
+OC_ROLE = '\n[oc-implementer]\nprovider = "opencode"\nwrite = true\n'
+OC_WORKFLOW = '\n[oc-build]\nshape = "implement"\nimplement = "oc-implementer"\n'
+
+
+@dataclass
+class _CappedWriter:
+    """opencode writing under a cap: it applies ``edit``, charges ``cost`` to the run's
+    ledger, and stops with exit 7 and a partial once the spend reaches the cap;
+    ``unmeasured`` stands for a finish without the measure its cap needs."""
+
+    edit: Edit | None = _flag
+    cost: float = 0.75
+    unmeasured: bool = False
+    specs: list[RunSpec] = field(default_factory=list)
+
+    def run(self, spec: RunSpec) -> RunResult:
+        self.specs.append(spec)
+        workspace = spec.profile.workspace
+        assert workspace is not None and workspace.write
+        if self.edit is not None:
+            self.edit(workspace.path)
+        ledger, crossed = spec.budget, False
+        if ledger is not None:
+            ledger.measure(cost=self.cost, input_tokens=None)
+            if self.unmeasured:
+                ledger.complete = False
+            ledger.settle()
+            crossed = ledger.crossed
+        code, reason = 0, None
+        if crossed:
+            code, reason = BUDGET_EXIT_CODE, BUDGET_EXHAUSTED
+        elif self.unmeasured and ledger is not None:
+            code, reason = 1, BUDGET_UNMEASURED
+        spec = spec.with_run_dir_defaults()
+        return record(
+            spec,
+            RunResult(
+                exit_code=code,
+                provider="opencode",
+                model=spec.model,
+                report_path=spec.report_log,
+                events_log=spec.events_log,
+                tokens=TokenUsage(input=100, output=10),
+                duration_seconds=0.1,
+                tool_call_completed=False,
+                text="I added it" if code == 0 else None,
+                run_id=run_id_of(spec),
+                cost_usd=self.cost,
+                partial_text="I was adding it" if crossed else None,
+                failure_reason=reason,
+                usage_complete=not (self.unmeasured and ledger is not None),
+            ),
+        )
+
+
+def _capped_writer(
+    world: World, monkeypatch: pytest.MonkeyPatch, **fields: object
+) -> _CappedWriter:
+    config = world.home / ".config" / "ha"
+    with (config / "roles.toml").open("a") as stream:
+        stream.write(OC_ROLE)
+    with (config / "workflows.toml").open("a") as stream:
+        stream.write(OC_WORKFLOW)
+    writer = _CappedWriter(**fields)  # type: ignore[arg-type]
+    monkeypatch.setattr(engine, "get_provider", lambda name: writer)
+    return writer
+
+
+def test_an_implement_step_stopped_on_the_cap_commits_its_residue(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _capped_writer(world, monkeypatch)
+    outcome = world.implement("Add a flag.", target="oc-build", max_cost=0.5)
+    assert outcome.exit_code == BUDGET_EXIT_CODE, world.said
+    run_id = outcome.run_id
+    assert _subjects(world, f"ha/{run_id}") == [
+        f"chore(ha): {run_id} residue via opencode/oc-default"
+    ]
+    assert lineage.load(world.state, run_id).members == {run_id: "budget_exhausted"}
+    report = json.loads((outcome.run_dir / "run.json").read_text())
+    assert (report["status"], report["exit_code"], report["failure_reason"]) == (
+        "budget_exhausted",
+        7,
+        "budget_exhausted",
+    )
+    (step,) = report["steps"]
+    assert (step["partial_answer"], step["steps_after_crossing"]) == ("I was adding it", 0)
+    assert report["budget"]["overshoot_cost"] == 0.25
+    code, out, _ = world.cli("show", run_id, "--json")
+    assert code == 0 and json.loads(out)["status"] == "budget_exhausted"
+
+
+def test_a_run_stopped_on_the_cap_can_be_continued(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer = _capped_writer(world, monkeypatch)
+    first = world.implement("Add a flag.", target="oc-build", max_cost=0.5)
+    assert first.exit_code == BUDGET_EXIT_CODE
+    writer.edit = _fix
+    second = world.implement("Turn it on.", target="oc-build", continue_run=first.run_id)
+    assert second.exit_code == 0, world.said
+    assert lineage.load(world.state, first.run_id).members == {
+        first.run_id: "budget_exhausted",
+        second.run_id: "committed",
+    }
+
+
+def test_a_budget_stop_that_changed_nothing_exits_7_and_commits_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _capped_writer(world, monkeypatch, edit=None)
+    outcome = world.implement("Add a flag.", target="oc-build", max_cost=0.5)
+    assert outcome.exit_code == BUDGET_EXIT_CODE
+    assert _subjects(world, f"ha/{outcome.run_id}") == []
+    assert lineage.load(world.state, outcome.run_id).members == {outcome.run_id: "budget_exhausted"}
+
+
+def test_an_unmeasured_write_step_fails_with_its_reason(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _capped_writer(world, monkeypatch, cost=0.25, unmeasured=True)
+    outcome = world.implement("Add a flag.", target="oc-build", max_cost=0.5)
+    assert outcome.exit_code == 1
+    report = json.loads((outcome.run_dir / "run.json").read_text())
+    assert (report["status"], report["failure_reason"]) == ("failed", "budget_unmeasured")
+    assert report["budget"]["spent_complete"] is False
+    assert lineage.load(world.state, outcome.run_id).members == {outcome.run_id: "failed"}
+
+
+def test_a_tripwire_during_a_capped_run_keeps_its_own_code(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def tamper(root: Path) -> None:
+        (root / ".git").write_text("gitdir: /somewhere/else\n")
+
+    writer = _capped_writer(world, monkeypatch, edit=tamper)
+    outcome = world.implement("Tamper.", target="oc-build", max_cost=0.5)
+    ledger = writer.specs[0].budget
+    assert ledger is not None and ledger.crossed, "the step did reach its cap"
+    assert outcome.exit_code == 1
+    report = json.loads((outcome.run_dir / "run.json").read_text())
+    assert (report["status"], report["failure_reason"]) == ("failed", "tripwire")
+    assert lineage.load(world.state, outcome.run_id).compromised == "tripwire"
+
+
+def test_ha_run_of_a_write_stopped_on_the_cap_prints_nothing_on_stdout(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _capped_writer(world, monkeypatch)
+    code, out, err = world.cli("run", "oc-build", "--max-cost", "0.5", "Add a flag.")
+    assert (code, out) == (BUDGET_EXIT_CODE, "")
+    assert "branch: ha/" in err and "patch: " in err, "the residue is named on stderr"
+    assert err.endswith(
+        "ha: budget exhausted; partial answer follows (not an answer):\nI was adding it\n"
+    )
+    code, out, _ = world.cli("run", "oc-build", "--max-cost", "0.5", "--json", "Add a flag.")
+    assert code == BUDGET_EXIT_CODE and json.loads(out)["status"] == "budget_exhausted"

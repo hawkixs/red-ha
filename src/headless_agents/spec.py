@@ -34,6 +34,12 @@ at most :data:`headless_agents.structured.MAX_SCHEMA_BYTES` bytes -- checked her
 construction -- and only a rail with a native mechanism honours it (claude and
 codex); every other rail refuses the run before anything starts. The answer is
 ``RunResult.text``, which ``ha`` checks is JSON (:mod:`headless_agents.structured`).
+
+``budget`` is the run's :class:`~headless_agents.budget.Ledger` when the run is capped
+(spec 2026-10-13 usage and budget §3.6), ``None`` otherwise. Only a rail that reports
+usage during a run (opencode) can enforce it; ``ha run`` refuses a cap on any other rail
+before anything starts, and a library caller that hands one to another rail gets an
+uncapped run.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Final
 
+from .budget import Ledger
 from .context import ContextBundle
 from .profile import CapabilityProfile
 from .structured import schema_text
@@ -100,6 +107,7 @@ class RunSpec:
     context: ContextBundle | None = None
     extra: dict[str, object] = field(default_factory=dict)
     output_schema: Mapping[str, object] | None = None
+    budget: Ledger | None = None
 
     def __post_init__(self) -> None:
         """A run is named by its directory (:func:`run_dir_name`): refuse one with none.

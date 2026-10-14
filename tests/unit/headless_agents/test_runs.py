@@ -538,3 +538,15 @@ def test_an_unknown_provider_name_makes_the_entry_unknown(tmp_path: Path) -> Non
 @pytest.mark.parametrize("name", PROVIDER_NAMES)
 def test_every_registry_name_is_a_provider_an_entry_may_name(tmp_path: Path, name: str) -> None:
     assert _with_providers(tmp_path, [name]).resolve(_RID).providers == (name,)
+
+
+# ── budget stops (spec 2026-10-13 usage and budget §3.6) ────────────────────
+
+
+def test_a_budget_stop_is_a_final_status_the_registry_records(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    entry = registry.register(run_dir=None, target=_TARGET, repository=None, lineage=None)
+    registry.set_status(entry.run_id, "budget_exhausted")
+    again = registry.resolve(entry.run_id)
+    assert again.status == "budget_exhausted" and "budget_exhausted" in STORED_STATUSES
+    assert registry.effective_status(again, None) == "budget_exhausted"

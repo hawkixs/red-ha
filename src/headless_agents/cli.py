@@ -38,7 +38,8 @@ from typing import IO, Final
 
 from . import lineage as lineages
 from . import locks, presets, prove, quarantine, show, updaters
-from .capability import INVALID_USAGE_EXIT_CODE
+from .budget import cost_cap, input_tokens_cap
+from .capability import BUDGET_EXIT_CODE, INVALID_USAGE_EXIT_CODE
 from .cli_models import MODEL_OPTIONAL, MODELS_FILE_NAME, default_models_path, load_models
 from .config_paths import config_dir, config_file, state_dir
 from .engine import (
@@ -100,6 +101,9 @@ exit codes of a run (a role or a provider):
   3 provider unavailable (a chain that runs out of links returns its last link's 3 or 4)
   4 timeout with no tool call started
   5 write run with no change
+  7 stopped at its budget cap (--max-cost, --max-input-tokens, a role's max_cost or
+    max_input_tokens): partial answer on stderr, never stdout (with --json: only
+    run.json's partial_answer); no fallback
   124 timeout
   130 interrupted (Ctrl-C); the run reads incomplete
 
@@ -107,6 +111,8 @@ exit codes of a workflow (implement, review):
   0 committed (implement), approved (review)
   6 changes requested (review)
   5 the implementation changed nothing (implement)
+  7 stopped at its budget cap: no later step, member or judge started; an implement
+    step's residue is committed and can be continued
   1 a step failed (its residue committed), the tripwire fired, HEAD moved, a hook
     refused, or the verdict is unreadable; the step's own code is in run.json
   2 invalid usage or configuration, a refused --run, --continue or --findings, a
@@ -140,6 +146,26 @@ class Io:
 def _store_true_or_none(parser: argparse.ArgumentParser, *flags: str, help: str) -> None:
     """A flag that is ``True`` when given and ``None`` when absent: an override."""
     parser.add_argument(*flags, action="store_const", const=True, default=None, help=help)
+
+
+def _max_cost(text: str) -> float:
+    """``--max-cost USD`` (spec 2026-10-13 usage and budget §3.4)."""
+    try:
+        return cost_cap(float(text))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: a cost cap is a finite number of USD greater than zero"
+        ) from None
+
+
+def _max_input_tokens(text: str) -> int:
+    """``--max-input-tokens N`` (spec 2026-10-13 usage and budget §3.4)."""
+    try:
+        return input_tokens_cap(int(text))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{text!r}: an input-token cap is a whole number greater than zero"
+        ) from None
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -226,6 +252,20 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--base-url", help="the endpoint of openai-compat")
     run.add_argument("--key-env", metavar="VAR", help="the key variable of openai-compat")
     run.add_argument("--max-tokens", type=int, metavar="N", help="maximum HTTP answer tokens")
+    run.add_argument(
+        "--max-cost",
+        type=_max_cost,
+        metavar="USD",
+        help="stop the run at the step whose measured cost reaches USD; exit 7, the partial "
+        "answer kept apart (every link must report usage during the run: opencode)",
+    )
+    run.add_argument(
+        "--max-input-tokens",
+        type=_max_input_tokens,
+        metavar="N",
+        help="stop the run at the step whose total input tokens, cache reads included, "
+        "reach N; exit 7, the partial answer kept apart (opencode links only)",
+    )
     run.add_argument("--json", action="store_true", help="print run.json")
     run.add_argument("--run-dir", type=Path, help="the run's directory (must not exist)")
     run.add_argument(
@@ -894,6 +934,8 @@ def _run(args: argparse.Namespace, io: Io) -> int:
         findings_run=args.findings_run,
         wait_seconds=args.wait,
         output_schema=output_schema,
+        max_cost=args.max_cost,
+        max_input_tokens=args.max_input_tokens,
     )
     outcome = execute(plan(request), say=io.say)
     report = outcome.report
@@ -909,7 +951,10 @@ def _run(args: argparse.Namespace, io: Io) -> int:
             io.stdout.write(text if text.endswith("\n") else text + "\n")
     elif outcome.final is not None:
         if isinstance(branch, str):
-            io.stdout.write(_write_header(outcome, branch))
+            # Spec 2026-10-13 usage §3.6: a budget stop prints nothing on stdout; a write's
+            # header (run, branch, diffstat, patch) still names its residue, on stderr.
+            stopped = outcome.exit_code == BUDGET_EXIT_CODE
+            (io.stderr if stopped else io.stdout).write(_write_header(outcome, branch))
         text = outcome.final.text
         if text:
             io.stdout.write(text if text.endswith("\n") else text + "\n")
@@ -921,7 +966,23 @@ def _run(args: argparse.Namespace, io: Io) -> int:
             f"{provider} exited {outcome.exit_code}{because}; run {outcome.run_id}, "
             f"logs in {outcome.run_dir}"
         )
+    partial = _partial_answer(report) if outcome.exit_code == BUDGET_EXIT_CODE else None
+    if partial is not None and not args.json:
+        # Spec 2026-10-13 usage §3.6: stdout holds answers only; the partial goes to
+        # stderr, labelled so that no reader takes it for one.
+        io.say("budget exhausted; partial answer follows (not an answer):")
+        io.stderr.write(partial if partial.endswith("\n") else partial + "\n")
     return outcome.exit_code
+
+
+def _partial_answer(report: Mapping[str, object]) -> str | None:
+    """The partial answer of the step that stopped the run on its budget, if any."""
+    steps = report.get("steps")
+    for step in reversed(steps if isinstance(steps, list) else []):
+        partial = step.get("partial_answer") if isinstance(step, dict) else None
+        if isinstance(partial, str) and partial.strip():
+            return partial
+    return None
 
 
 # ── ha roles ────────────────────────────────────────────────────────────────

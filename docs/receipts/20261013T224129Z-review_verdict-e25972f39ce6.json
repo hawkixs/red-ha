@@ -1,0 +1,57 @@
+{
+  "digest": "sha256:e25972f39ce679634a48c00fa4dd4e1a24f11fef6324acb531e6a96335b1e8df",
+  "idempotency_key": "review_verdict:fcb191d813fcd5caccdb37605125841f9c277238:115576395869",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "spec_plan",
+      "blocking": false,
+      "check_run_id": 115576395869,
+      "diff_truncated": true,
+      "finding_count": 2,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "Task 3's `_capped` implementation defines `roles = [slot.role for slot in planned.panel] or [planned.role]` and then checks only those roles. The judge is not part of `planned.panel` in the described review structure, so its caps are not included in `min(...)` resolution and its provider is never pa",
+          "file": "docs/plans/2026-10-13-budget-caps.md",
+          "id": "F-20-1",
+          "line": null,
+          "severity": "important",
+          "status": "new",
+          "title": "Review judges are omitted from cap resolution and admission"
+        },
+        {
+          "class": "note",
+          "evidence": "Task 6's `part_input_tokens` returns `None` unless both `tokens.input` and `tokens.cache.read` are present, and `_part_token_fields` uses that function for the `input` field. This conflicts with the plan's requirement to validate and preserve token fields independently, including retaining known inp",
+          "file": "docs/plans/2026-10-13-budget-caps.md",
+          "id": "F-20-2",
+          "line": null,
+          "severity": "important",
+          "status": "new",
+          "title": "Known input tokens can be discarded when cache.read is absent"
+        }
+      ],
+      "independent": true,
+      "mode": "light",
+      "not_reviewed": [],
+      "pr": 20,
+      "providers": [
+        "codex",
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "fcb191d813fcd5caccdb37605125841f9c277238",
+      "unseen_count": 1,
+      "unseen_files": [
+        "docs/plans/2026-10-13-budget-caps.md"
+      ],
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-13T22:41:29.965501Z",
+  "schema_version": 1
+}

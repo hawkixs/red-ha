@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
 
+from headless_agents.budget import Caps
 from headless_agents.context import ContextBundle
 from headless_agents.engine import (
     REVIEW_DEFAULT_TASK,
@@ -618,3 +619,122 @@ def test_a_non_toml_operator_vendor_table_refuses_review_planning(env: Env) -> N
     (env.config / "vendors.toml").write_text("not = [toml")
     with pytest.raises(UsageError, match=r"vendors\.toml"):
         plan(env.request("panel", None))
+
+
+# ── budget caps: resolution and admission (spec 2026-10-13 usage and budget §3.4, §3.5) ─
+
+
+def _capped(env: Env, target: str, prompt: str | None = "task", **caps: object) -> Request:
+    return replace(env.request(target, prompt), **caps)  # type: ignore[arg-type]
+
+
+def _opencode_panel(env: Env, judge: str = "opencode") -> None:
+    env.roles(
+        '[oc-a]\nprovider = "opencode"\nmax_input_tokens = 5000\n\n'
+        '[oc-b]\nprovider = "opencode"\nmax_input_tokens = 3000\nmax_cost = 0.75\n\n'
+        f'[oc-judge]\nprovider = "{judge}"\nmax_input_tokens = 4000\n\n'
+        '[oc-build]\nprovider = "opencode"\nwrite = true\n'
+    )
+    (env.config / "workflows.toml").write_text(
+        '[oc-panel]\nshape = "review"\nreview = ["oc-a", "oc-b"]\njudge = "oc-judge"\n\n'
+        '[oc-implement]\nshape = "implement"\nimplement = "oc-build"\n'
+    )
+
+
+def test_an_uncapped_run_plans_no_caps(env: Env) -> None:
+    planned = plan(env.request("opencode", "task"))
+    assert planned.caps == Caps() and not planned.caps.capped
+
+
+def test_the_command_line_caps_the_run(env: Env, no_subprocess: list[object]) -> None:
+    planned = plan(_capped(env, "opencode", max_cost=0.5, max_input_tokens=4000))
+    assert planned.caps == Caps(max_cost=0.5, max_input_tokens=4000)
+
+
+def test_a_roles_caps_apply_and_the_command_line_wins_even_when_larger(env: Env) -> None:
+    env.roles('[oc]\nprovider = "opencode"\nmax_cost = 0.5\nmax_input_tokens = 4000\n')
+    assert plan(env.request("oc", "task")).caps == Caps(max_cost=0.5, max_input_tokens=4000)
+    planned = plan(_capped(env, "oc", max_input_tokens=9000))
+    assert planned.caps == Caps(max_cost=0.5, max_input_tokens=9000)
+
+
+def test_a_workflow_takes_the_smallest_cap_of_its_roles(env: Env) -> None:
+    _opencode_panel(env)
+    planned = plan(env.request("oc-panel", None))
+    assert planned.caps == Caps(max_cost=0.75, max_input_tokens=3000)
+
+
+def test_caps_are_run_options_a_workflow_accepts(env: Env) -> None:
+    _opencode_panel(env)
+    planned = plan(_capped(env, "oc-implement", "Add a flag.", max_cost=0.25))
+    assert planned.caps == Caps(max_cost=0.25)
+    reviewed = plan(_capped(env, "oc-panel", None, max_input_tokens=100))
+    assert reviewed.caps == Caps(max_cost=0.75, max_input_tokens=100)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "flag"),
+    [
+        ("max_cost", 0, "--max-cost"),
+        ("max_cost", -1.0, "--max-cost"),
+        ("max_cost", float("nan"), "--max-cost"),
+        ("max_cost", float("inf"), "--max-cost"),
+        ("max_cost", True, "--max-cost"),
+        ("max_input_tokens", 0, "--max-input-tokens"),
+        ("max_input_tokens", -5, "--max-input-tokens"),
+        ("max_input_tokens", 1.5, "--max-input-tokens"),
+        ("max_input_tokens", True, "--max-input-tokens"),
+    ],
+)
+def test_an_invalid_cap_is_a_usage_error(
+    env: Env, no_subprocess: list[object], field_name: str, value: object, flag: str
+) -> None:
+    with pytest.raises(UsageError, match=f"^{flag} .*: must be a"):
+        plan(_capped(env, "opencode", **{field_name: value}))
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex", "agy", "vibe", "openrouter"])
+def test_a_cap_on_a_rail_that_cannot_enforce_it_is_refused_before_anything(
+    env: Env, no_subprocess: list[object], provider: str
+) -> None:
+    (env.config / "models.toml").write_text(
+        'claude = "c"\ncodex = "x"\nagy = "g"\nvibe = "v"\nopenrouter = "o"\n'
+    )
+    with pytest.raises(
+        UsageError,
+        match=(
+            f"^role {provider}, link {provider}: max_input_tokens 1000 cannot be enforced: "
+            f"{provider} reports no usage during a run; nothing ran$"
+        ),
+    ):
+        plan(_capped(env, provider, max_input_tokens=1000))
+    with pytest.raises(UsageError, match=f"max_cost 0.5 USD cannot be enforced: {provider}"):
+        plan(_capped(env, provider, max_cost=0.5))
+    assert not env.state.exists(), "nothing registered"
+
+
+def test_a_chain_whose_second_link_only_is_unable_is_refused(env: Env) -> None:
+    env.roles('[pair]\nchain = ["opencode", "codex"]\n')
+    with pytest.raises(UsageError, match="^role pair, link codex: max_cost 1 USD cannot be"):
+        plan(_capped(env, "pair", max_cost=1.0))
+    assert plan(env.request("pair", "task")).caps == Caps(), "uncapped, the chain still plans"
+
+
+def test_a_role_cap_on_a_rail_that_cannot_enforce_it_refuses_every_run_of_it(env: Env) -> None:
+    env.roles('[rev]\nprovider = "codex"\nmax_cost = 1\n')
+    with pytest.raises(UsageError, match="^role rev, link codex: max_cost 1 USD cannot be"):
+        plan(env.request("rev", "task"))
+
+
+def test_a_review_whose_judge_only_is_unable_is_refused(
+    env: Env, no_subprocess: list[object]
+) -> None:
+    _opencode_panel(env, judge="codex")
+    with pytest.raises(UsageError, match="^role oc-judge, link codex: .* cannot be enforced"):
+        plan(env.request("oc-panel", None))
+
+
+def test_an_implement_workflow_on_an_unable_rail_is_refused(env: Env) -> None:
+    _workflows(env)
+    with pytest.raises(UsageError, match="^role implementer, link codex: max_input_tokens 10 "):
+        plan(_capped(env, "build", "Add a flag.", max_input_tokens=10))

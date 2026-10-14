@@ -8,6 +8,7 @@ API in test_engine_plan.py; here, that the CLI reaches them and reports them.
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -1546,3 +1547,68 @@ def test_show_exits_1_when_the_state_cannot_be_read(world: _World) -> None:
     code, out, err = world.run("show", run_id)
     assert code == 1 and "recover it by hand" in err
     assert out.splitlines()[0] == f"{run_id}  -  exit -  unknown"
+
+
+# ── budget caps (spec 2026-10-13 usage and budget §3.4, §3.5; review note F-17-2) ─
+
+
+def _run_help() -> str:
+    parser = cli._parser()
+    commands = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    return commands.choices["run"].format_help()
+
+
+def test_the_run_parser_takes_both_caps() -> None:
+    args = cli._parser().parse_args(
+        ["run", "opencode", "task", "--max-cost", "0.25", "--max-input-tokens", "4000"]
+    )
+    assert (args.max_cost, args.max_input_tokens) == (0.25, 4000)
+    bare = cli._parser().parse_args(["run", "opencode", "task"])
+    assert (bare.max_cost, bare.max_input_tokens) == (None, None)
+
+
+def test_the_run_help_documents_both_caps() -> None:
+    text = " ".join(_run_help().split())
+    assert "--max-cost USD" in text and "--max-input-tokens N" in text
+    assert "cache reads included" in text and "exit 7" in text
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--max-cost", "0"),
+        ("--max-cost", "-1"),
+        ("--max-cost", "nan"),
+        ("--max-cost", "inf"),
+        ("--max-cost", "abc"),
+        ("--max-input-tokens", "0"),
+        ("--max-input-tokens", "-3"),
+        ("--max-input-tokens", "1.5"),
+        ("--max-input-tokens", "1e6"),
+    ],
+)
+def test_an_invalid_cap_exits_2_and_nothing_runs(world: _World, flag: str, value: str) -> None:
+    code, out, err = world.run("run", "opencode", flag, value, "task")
+    assert code == 2 and out == ""
+    assert f"argument {flag}: {value!r}:" in err
+    assert world.registry().run_ids() == [] and world.fakes == {}
+
+
+def test_a_cap_on_a_rail_that_cannot_enforce_it_exits_2_before_anything(world: _World) -> None:
+    code, out, err = world.run("run", "codex", "--max-cost", "0.5", "task")
+    assert code == 2 and out == ""
+    assert err == (
+        "ha: role codex, link codex: max_cost 0.5 USD cannot be enforced: codex reports no "
+        "usage during a run; nothing ran\n"
+    )
+    assert world.registry().run_ids() == [] and world.fakes == {}
+
+
+def test_the_run_epilog_documents_exit_7_for_runs_and_workflows() -> None:
+    """Spec 2026-10-13 usage and budget §3.7, A1."""
+    help_text = _run_help()
+    assert help_text.count("  7 stopped at its budget cap") == 2
+    assert (
+        "partial answer on stderr, never stdout (with --json: only\n"
+        "    run.json's partial_answer); no fallback"
+    ) in help_text

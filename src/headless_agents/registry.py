@@ -25,6 +25,7 @@ from functools import partial
 from pathlib import Path
 from typing import Final
 
+from .budget import Caps
 from .capability import scoped_environment
 from .keys import KeysError, preset_key
 from .protocol import AgentProvider
@@ -69,6 +70,14 @@ _MAX_PROMPT_BYTES: Final[Mapping[str, int | None]] = {
     **dict.fromkeys(HTTP_PROVIDER_NAMES),
 }
 
+#: Spec 2026-10-13 usage and budget §3.5: the rails that report usage DURING a run, the
+#: only ones that can stop a capped run at the step that reaches its cap (D1). The others
+#: learn usage at the end of a run (claude, codex, agy, the HTTP providers) or never (vibe).
+USAGE_DURING_RUN_RAILS: frozenset[str] = frozenset({"opencode"})
+#: The rails that report a cost at all; codex, agy and vibe report tokens only, and ha
+#: ships no price table (D3).
+COST_REPORTING_RAILS: frozenset[str] = frozenset({"claude", "opencode", *HTTP_PROVIDER_NAMES})
+
 PROBE_TIMEOUT_SECONDS = 10.0
 
 
@@ -98,6 +107,27 @@ def _known(name: str) -> str:
 def get_provider(name: str) -> AgentProvider:
     """A new instance of the rail called ``name``."""
     return _FACTORIES[_known(name)]()
+
+
+def reports_usage_during_run(name: str) -> bool:
+    """Whether the rail reports its usage while it runs (spec 2026-10-13 usage §3.5)."""
+    return _known(name) in USAGE_DURING_RUN_RAILS
+
+
+def reports_cost(name: str) -> bool:
+    """Whether the rail reports a cost in USD (spec 2026-10-13 usage §3.5)."""
+    return _known(name) in COST_REPORTING_RAILS
+
+
+def cap_refusal(name: str, caps: Caps) -> str | None:
+    """Why the rail ``name`` cannot enforce ``caps``, or ``None`` when it can (D1)."""
+    if not caps.capped:
+        return None
+    if not reports_usage_during_run(name):
+        return f"{caps.describe()} cannot be enforced: {name} reports no usage during a run"
+    if caps.max_cost is not None and not reports_cost(name):
+        return f"max_cost {caps.max_cost:g} USD cannot be enforced: {name} reports no cost"
+    return None
 
 
 def max_prompt_bytes(name: str) -> int | None:
