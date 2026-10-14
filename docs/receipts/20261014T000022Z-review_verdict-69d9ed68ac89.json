@@ -1,0 +1,81 @@
+{
+  "digest": "sha256:69d9ed68ac896260b291d2f2b3f6399e24b0f9f642ce7bb5bcf948bd161a544c",
+  "idempotency_key": "review_verdict:b129b4fdc00b5c63a9dea0ba527c104f37517ef9:115604257108",
+  "issuer": "red-rail-reviewer",
+  "kind": "attestation",
+  "payload": {
+    "data": {
+      "artifact": "code",
+      "blocking": false,
+      "carry_forwards": {
+        "addressed": [],
+        "deferred": [
+          "CF-4-3"
+        ]
+      },
+      "check_run_id": 115604257108,
+      "diff_truncated": false,
+      "finding_count": 4,
+      "findings": [
+        {
+          "class": "note",
+          "evidence": "`_capped` sets `roles = [slot.role for slot in planned.panel] or [planned.role]` and both the min() cap resolution and the per-link `cap_refusal` loop iterate only those roles. If the review judge slot is not an element of `planned.panel` (its judge is resolved separately in `_execute_review` from `",
+          "file": "src/headless_agents/engine.py",
+          "id": "F-21-1",
+          "line": 755,
+          "severity": "important",
+          "status": "new",
+          "title": "Judge role may be outside cap resolution and admission"
+        },
+        {
+          "class": "note",
+          "evidence": "In the provider's `run`, `elif exit_code == 1 and meter.unmeasured` sets `failure_reason = BUDGET_UNMEASURED` even when the child's own exit 1 had a different cause (the meter's unmeasured flag is set for good by `close`). The stderr note written in `run_opencode` does distinguish the cases, but `ru",
+          "file": "src/headless_agents/providers/opencode.py",
+          "id": "F-21-2",
+          "line": 1355,
+          "severity": "minor",
+          "status": "new",
+          "title": "Unmeasured reason can attach to an unrelated exit 1"
+        },
+        {
+          "class": "note",
+          "evidence": "`test_kill_process_group_kills_at_once_without_a_grace` asserts elapsed < TERMINATION_GRACE_SECONDS / 2 (2.5s) on a loaded CI host after a fixed 0.3s sleep; under load the spawn or reaping could exceed the bound without any regression. Consider a generous bound or counting only the kill call itself.",
+          "file": "tests/unit/headless_agents/test_capability.py",
+          "id": "F-21-3",
+          "line": 189,
+          "severity": "minor",
+          "status": "new",
+          "title": "Timing-based kill test may be flaky"
+        },
+        {
+          "class": "note",
+          "evidence": "GOLDEN_BUDGET renders run tokens input=1500 as 'total   in 1k out 40' and the step row 'in 1k', while the budget line in the same output renders 'input 1.5k of 1.0k'. If the step/total formatter truncates to whole k while budget_line uses one decimal, this is intentional but inconsistent for the sam",
+          "file": "tests/unit/headless_agents/test_show.py",
+          "id": "F-21-4",
+          "line": 1044,
+          "severity": "minor",
+          "status": "new",
+          "title": "Same 1500 tokens shown as '1k' and '1.5k' in one golden output"
+        }
+      ],
+      "independent": true,
+      "mode": "deep",
+      "not_reviewed": [],
+      "pr": 21,
+      "providers": [
+        "glm",
+        "glm"
+      ],
+      "repository": "hawkixs/red-ha",
+      "round": 1,
+      "sha": "b129b4fdc00b5c63a9dea0ba527c104f37517ef9",
+      "unseen_count": 0,
+      "unseen_files": [],
+      "verdict": "approve"
+    },
+    "kind": "review_verdict"
+  },
+  "project": "red-ha",
+  "recorded_at": "2026-10-14T00:00:22.405634Z",
+  "schema_version": 1
+}
