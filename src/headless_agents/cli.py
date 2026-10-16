@@ -1284,8 +1284,15 @@ def main(
         cwd=cwd if cwd is not None else Path.cwd(),
         home=home if home is not None else Path(environ.get("HOME") or Path.home()),
     )
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # Recognize the output option even when parsing itself refuses. A prompt
+    # after ``--`` is data, and JSON on another command keeps its own contract.
+    options = arguments[: arguments.index("--")] if "--" in arguments else arguments
+    json_refusal = options[:1] == ["run"] and any(
+        option.startswith("--") and "--json".startswith(option) for option in options[1:]
+    )
     try:
-        args = _parse(sys.argv[1:] if argv is None else argv)
+        args = _parse(arguments)
         if args.version:
             io.stdout.write(f"ha {package_version('headless-agents')}\n")
             return 0
@@ -1314,10 +1321,17 @@ def main(
             "clean, init or prove"
         )
     except UsageError as exc:
-        io.say(str(exc))
+        reason = str(exc)
+        if json_refusal:
+            io.stdout.write(
+                json.dumps({"code": INVALID_USAGE_EXIT_CODE, "reason": reason}, ensure_ascii=False)
+                + "\n"
+            )
+        io.say(reason)
         return INVALID_USAGE_EXIT_CODE
     except ValueError as exc:
-        # A provider refusing its spec (an HTTP provider with a workspace, say).
+        # An unclassified provider error can escape after launch. Keep its
+        # historical diagnostic path; it is not proof of a pre-start refusal.
         io.say(str(exc))
         return INVALID_USAGE_EXIT_CODE
     except KeyboardInterrupt:

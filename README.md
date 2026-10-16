@@ -939,6 +939,13 @@ were removed in 0.5.0: the provider is the target, and a chain is declared in a 
   what was not measured and marking incomplete figures `≥ … (incomplete)`; `ha show` prints
   the same totals as its `total` line. `ha runs` lists runs newest first; `ha clean RUN_ID`
   removes one (its worktree through git, its branch kept).
+- **JSON refusals**: when `ha run --json` refuses before starting (including an
+  expired `--wait`), stdout contains `{"code": 2, "reason": "<diagnostic>"}` and
+  the exit code remains `2`. The diagnostic is also printed on stderr. `reason`
+  is human-readable text, not a stable reason identifier. Once a provider has
+  started, `--json` keeps the full run report even if the provider exits `2`.
+  An unexpected provider `ValueError` keeps its existing stderr-only error path;
+  it is not reported as a pre-start refusal.
 - **Exit codes**: `0` answer, or a review's APPROVE; `1` failure; `2` invalid usage (nothing
   ran); `3` provider unavailable, chain exhausted; `4` timeout with no tool call started;
   `5` `--write` finished with no change; `6` a review's CHANGES verdict; `7` the run stopped
