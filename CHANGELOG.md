@@ -29,6 +29,9 @@ member rode a brain-v42 tag.
 
 ### Fixed
 
+- `ha run --json` emits a minimal refusal object (`code`, `reason`) when it
+  refuses before starting, including an expired `--wait`; stderr and exit `2`
+  are preserved. Runs that started keep their existing JSON report.
 - The reader/writer fairness regression test now establishes real admission
   queue order and releases holders explicitly instead of relying on sleeps.
 
