@@ -27,6 +27,12 @@ member rode a brain-v42 tag.
 
 ## Unreleased
 
+### Fixed
+
+- `ha run --json` emits a minimal refusal object (`code`, `reason`) when it
+  refuses before starting, including an expired `--wait`; stderr and exit `2`
+  are preserved. Runs that started keep their existing JSON report.
+
 ## 0.5.6 — 2026-10-14 (tag `v0.5.6` after merge)
 
 ### Added

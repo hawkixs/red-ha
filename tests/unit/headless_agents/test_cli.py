@@ -1612,3 +1612,82 @@ def test_the_run_epilog_documents_exit_7_for_runs_and_workflows() -> None:
         "partial answer on stderr, never stdout (with --json: only\n"
         "    run.json's partial_answer); no fallback"
     ) in help_text
+
+
+@pytest.mark.parametrize(
+    ("options", "reason"),
+    [
+        (["--provider", "codex"], "-p was removed"),
+        (["--wait", "0"], "--wait"),
+        (["--wait", "not-a-number"], "invalid float value"),
+    ],
+)
+@pytest.mark.parametrize("json_flag", ["--json", "--js"])
+def test_json_refusal_reports_code_and_reason_before_start(
+    world: _World, options: list[str], reason: str, json_flag: str
+) -> None:
+    code, out, err = world.run("run", "codex", "go", json_flag, *options)
+    assert code == 2
+    refusal = json.loads(out)
+    assert set(refusal) == {"code", "reason"}
+    assert refusal["code"] == 2
+    assert reason in refusal["reason"]
+    assert reason in err
+    assert not any(fake.specs for fake in world.fakes.values())
+
+
+def test_json_expired_wait_reports_refusal_without_starting_a_provider(world: _World) -> None:
+    lock = world.state / "unconfined.lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "print('held', flush=True)\n"
+            "sys.stdin.read()\n",
+            str(lock),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == "held"
+        code, out, err = world.run("run", "codex", "go", "--json", "--wait", "0.05")
+        assert code == 2
+        refusal = json.loads(out)
+        assert set(refusal) == {"code", "reason"}
+        assert refusal["code"] == 2
+        assert "--wait 0.05 s expired" in refusal["reason"]
+        assert "--wait 0.05 s expired" in err
+        assert not any(fake.specs for fake in world.fakes.values())
+    finally:
+        holder.kill()
+        holder.wait()
+        if holder.stdin is not None:
+            holder.stdin.close()
+        if holder.stdout is not None:
+            holder.stdout.close()
+
+
+def test_a_prompt_after_option_separator_does_not_request_json(world: _World) -> None:
+    code, out, _ = world.run("run", "codex", "--provider", "codex", "--", "--json")
+    assert code == 2
+    assert out == ""
+
+
+def test_json_on_another_command_does_not_emit_a_run_refusal(world: _World) -> None:
+    code, out, _ = world.run("models", "--json", "--provider")
+    assert code == 2
+    assert out == ""
+
+
+def test_a_started_provider_exit_2_keeps_its_json_run_report(world: _World) -> None:
+    _prime(world, "codex", code=2)
+    code, out, _ = world.run("run", "codex", "go", "--json")
+    assert code == 2
+    report = json.loads(out)
+    assert "run_id" in report and "steps" in report
+    assert "code" not in report
