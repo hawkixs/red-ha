@@ -1030,7 +1030,8 @@ def test_the_package_installs_the_ha_command() -> None:
 
     pyproject = Path(__file__).resolve().parents[3] / "pyproject.toml"
     scripts = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["scripts"]
-    assert scripts == {"ha": "headless_agents.cli:main"}
+    assert scripts["ha"] == "headless_agents.cli:main"
+    assert scripts["ha-reprove-workers"] == "headless_agents.maintenance:main"
 
 
 def test_the_readme_synopsis_uses_the_new_grammar() -> None:

@@ -27,6 +27,11 @@ member rode a brain-v42 tag.
 
 ## Unreleased
 
+### Added
+
+- Add an optional systemd user timer and `ha-reprove-workers` command that detect
+  worker CLI changes, refresh stale proofs, and append coordination result events.
+
 ### Fixed
 
 - `ha run --json` emits a minimal refusal object (`code`, `reason`) when it
