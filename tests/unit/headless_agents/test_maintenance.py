@@ -207,3 +207,15 @@ def test_next_scheduled_cycle_reproves_a_changed_worker(cycle):
         == 0
     )
     assert events.read_text() == "PROVE codex 2.0.0 passed\n"
+
+
+def test_command_timeout_kills_and_reaps_the_command(tmp_path):
+    from headless_agents.maintenance import _json_command
+
+    pidfile = tmp_path / "pid"
+    script = f"import os,time; from pathlib import Path; Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    with pytest.raises(subprocess.TimeoutExpired):
+        _json_command([sys.executable, "-c", script], timeout=2)
+    pid = int(pidfile.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)

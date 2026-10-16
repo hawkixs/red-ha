@@ -14,11 +14,11 @@ from pathlib import Path
 WORKERS = ("codex", "agy", "opencode")
 
 
-def _json_command(argv: list[str]) -> tuple[int, object]:
+def _json_command(argv: list[str], *, timeout: float = 3600) -> tuple[int, object]:
     # Bound a broken CLI and its descendants. systemd additionally owns the cgroup.
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, start_new_session=True)
     try:
-        output, _ = process.communicate(timeout=3600)
+        output, _ = process.communicate(timeout=timeout)
     except BaseException:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -65,7 +65,7 @@ def cycle(ha: str, events: Path, rails: list[str]) -> int:
         except BlockingIOError:
             return 0
         try:
-            code, providers = _json_command([ha, "providers", "--json"])
+            code, providers = _json_command([ha, "providers", "--json"], timeout=60)
             if code or not isinstance(providers, list):
                 raise ValueError("invalid providers response")
             rows = {p["name"]: p for p in providers if isinstance(p, dict) and "name" in p}

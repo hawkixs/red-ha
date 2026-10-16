@@ -4,6 +4,7 @@ Description=Detect worker CLI changes and refresh stale proofs every fifteen min
 [Timer]
 OnCalendar=*:0/15
 RandomizedDelaySec=30
+AccuracySec=1s
 Persistent=true
 
 [Install]

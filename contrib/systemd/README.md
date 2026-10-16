@@ -1,7 +1,7 @@
 # Scheduled worker proof refresh
 
 The user timer detects changes to installed Codex, agy and OpenCode worker CLIs every
-fifteen minutes (plus up to thirty seconds of jitter). It runs the installed
+fifteen minutes (plus up to thirty seconds of random delay and one second of timer accuracy). It runs the installed
 `ha prove RAIL --stale --json` for each installed worker. Vendor auto-updaters or
 an operator can update the CLIs; this timer does not invoke vendor updaters.
 Unchanged passing proofs spend no provider tokens. Missing workers are skipped.
@@ -14,8 +14,9 @@ Each attempted proof appends `PROVE RAIL VERSION passed|failed` to
 Command, JSON and discovery failures emit failed lines and fail the service;
 other workers still run after a per-worker failure. Discovery failures use version
 `unknown`. The systemd journal retains command diagnostics. An exclusive cycle
-lock prevents duplicate manual/timer proof runs. Each command is bounded to one
-hour and the service to three hours; a timeout remains a failure. A failed proof
+lock prevents overlapping helper cycles (manual `ha-reprove-workers` or timer);
+it does not lock a separate manual `ha prove` invocation. Discovery is bounded to one minute, each proof command to one
+hour, and the service to three hours and five minutes; a timeout remains a failure. A failed proof
 remains refused and is retried next cycle, so a persistent failure can spend tokens
 each cycle; stop the timer while investigating persistent failures.
 
@@ -47,7 +48,7 @@ Override cadence with `systemctl --user edit ha-worker-proofs.timer` and clear
 `OnCalendar=` before supplying a new value. To choose workers or an events path,
 override `ExecStart=` with the absolute installed entry point and its `--rails`
 or `--events` options. The default events path deliberately matches the coordination
-consumer rather than `XDG_STATE_HOME`.
+consumer and ignores the `XDG_STATE_HOME` environment variable.
 
 Disable with `systemctl --user disable --now ha-worker-proofs.timer`.
 If a cycle is running, stop `ha-worker-proofs.service` separately; systemd stops its
