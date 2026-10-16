@@ -1691,3 +1691,19 @@ def test_a_started_provider_exit_2_keeps_its_json_run_report(world: _World) -> N
     report = json.loads(out)
     assert "run_id" in report and "steps" in report
     assert "code" not in report
+
+
+def test_a_post_start_value_error_is_not_a_prestart_json_refusal(
+    world: _World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_after_start(self: _Fake, spec: RunSpec) -> RunResult:
+        self.specs.append(spec)
+        raise ValueError("provider failed after starting")
+
+    monkeypatch.setattr(_Fake, "run", fail_after_start)
+    code, out, err = world.run("run", "codex", "go", "--json")
+    assert code == 2
+    (run_id,) = world.registry().run_ids()
+    assert world.registry().resolve(run_id).started_at is not None
+    assert out == ""
+    assert "provider failed after starting" in err

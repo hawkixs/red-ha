@@ -1320,8 +1320,7 @@ def main(
             "a command is required: run, roles, workflows, providers, models, runs, show, "
             "clean, init or prove"
         )
-    except (UsageError, ValueError) as exc:
-        # Includes a provider refusing its spec (an HTTP provider with a workspace).
+    except UsageError as exc:
         reason = str(exc)
         if json_refusal:
             io.stdout.write(
@@ -1329,6 +1328,11 @@ def main(
                 + "\n"
             )
         io.say(reason)
+        return INVALID_USAGE_EXIT_CODE
+    except ValueError as exc:
+        # An unclassified provider error can escape after launch. Keep its
+        # historical diagnostic path; it is not proof of a pre-start refusal.
+        io.say(str(exc))
         return INVALID_USAGE_EXIT_CODE
     except KeyboardInterrupt:
         # The engine released its locks and the rail killed its provider on the
