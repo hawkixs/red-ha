@@ -27,6 +27,7 @@ dependencies = [
 
 [project.scripts]
 ha = "headless_agents.cli:main"
+ha-reprove-workers = "headless_agents.maintenance:main"
 
 [project.urls]
 Homepage = "https://github.com/hawkixs/red-ha"

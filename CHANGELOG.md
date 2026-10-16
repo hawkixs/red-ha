@@ -39,6 +39,9 @@ member rode a brain-v42 tag.
 
 ### Added
 
+- Add an optional systemd user timer and `ha-reprove-workers` command that detect
+  worker CLI changes, refresh stale proofs, and append coordination result events.
+
 - Usage on every CLI rail that reports it (spec `docs/specs/2026-10-13-usage-and-budget-design.md`,
   PR1): claude records tokens and cost, codex and agy record tokens (`cost_usd: null`);
   vibe stays unmeasured. `envelope.extract_claude`, `claude_usage`, `codex_usage` and
