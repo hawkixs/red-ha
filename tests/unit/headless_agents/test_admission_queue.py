@@ -549,19 +549,30 @@ def test_a_reader_is_not_timed_out_by_later_writers(tmp_path: Path) -> None:
 
 
 def test_a_writer_is_not_starved_by_overlapping_readers(tmp_path: Path) -> None:
-    with _children(tmp_path) as (_, events, spawn):
-        processes = []
-        for index in range(1, 7):  # two waves of overlapping readers
-            processes.append(spawn("admit-shared", f"R{index}", hold=0.4))
-            time.sleep(0.15)
-        writer = spawn("admit-exclusive", "E", wait="5", hold=0.1)
-        _until_logged(events, ("E", "queued"))
-        time.sleep(0.05)
-        for index in range(7, 11):  # the readers arriving after it
-            processes.append(spawn("admit-shared", f"R{index}", hold=0.4))
-            time.sleep(0.15)
+    with _children(tmp_path) as (state, events, spawn):
+        early = []
+        for index in range(1, 7):
+            label = f"R{index}"
+            early.append(spawn("holder-shared", label))
+            _until_logged(events, (label, "admitted"))
+        writer = spawn("holder-exclusive", "E", wait="5")
+        _until_a_writer_waits(state, writer)
+        later = [spawn("admit-shared", f"R{index}") for index in range(7, 11)]
+        later_pids = {reader.pid for reader in later}
+        _until(
+            lambda: later_pids.issubset(
+                waiter.pid for waiter in locks.waiters(state) if waiter.alive
+            ),
+            "all later readers waiting behind the writer",
+            children=(writer, *later),
+        )
+        for index in range(1, 7):
+            _release(events, f"R{index}")
+        _until_logged(events, ("E", "admitted"))
+        assert not any((f"R{index}", "admitted") in _log(events) for index in range(7, 11))
+        _release(events, "E")
         assert writer.wait(timeout=10) == 0, "the writer timed out"
-        assert all(process.wait(timeout=20) == 0 for process in processes)
+        assert all(process.wait(timeout=20) == 0 for process in [*early, *later])
         logged = _log(events)
         for index in range(7, 11):
             assert logged[(f"R{index}", "admitted")] > logged[("E", "released")], (
